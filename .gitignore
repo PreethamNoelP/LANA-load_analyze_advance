@@ -12,9 +12,6 @@ __pycache__/
 # Environment variables (contains secrets)
 .env
 
-# Streamlit cache
-.streamlit/
-
 # Chat sessions
 chats/
 
@@ -23,9 +20,6 @@ chats/
 *.pdf
 *.docx
 
-# ChromaDB vector store
-chroma_db/
-
 # OS files
 .DS_Store
 Thumbs.db
@@ -33,3 +27,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

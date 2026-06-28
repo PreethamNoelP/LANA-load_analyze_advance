@@ -17,27 +17,8 @@ class LLMConfig:
 
 
 @dataclass
-class RAGConfig:
-    enabled: bool = field(default_factory=lambda: os.getenv("ENABLE_RAG", "false").lower() == "true")
-    chroma_persist_dir: str = field(default_factory=lambda: os.getenv("CHROMA_PERSIST_DIR", "./chroma_db"))
-    embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "nomic-embed-text"))
-    top_k: int = field(default_factory=lambda: int(os.getenv("RAG_TOP_K", "5")))
-    chunk_size: int = field(default_factory=lambda: int(os.getenv("RAG_CHUNK_SIZE", "500")))
-
-
-@dataclass
-class AuthConfig:
-    firebase_credentials_path: str = field(
-        default_factory=lambda: os.getenv("FIREBASE_CREDENTIALS_PATH", "")
-    )
-    enabled: bool = field(default_factory=lambda: os.getenv("AUTH_ENABLED", "true").lower() == "true")
-
-
-@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
-    rag: RAGConfig = field(default_factory=RAGConfig)
-    auth: AuthConfig = field(default_factory=AuthConfig)
 
 
 config = AppConfig()

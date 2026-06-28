@@ -1,19 +1,16 @@
-"""Chart generation — all charts are returned as PNG bytes for Streamlit display."""
-
-from __future__ import annotations
+"""Chart generation — returns PNG bytes, called by the FastAPI /chart endpoint."""
 
 import io
-from typing import Optional
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
 CHART_TYPES = [
+    "Histogram",
     "Line Plot",
     "Bar Chart",
     "Scatter Plot",
-    "Histogram",
     "Box Plot",
     "Heatmap",
     "Violin Plot",
@@ -35,7 +32,7 @@ def create_chart(
     df: pd.DataFrame,
     chart_type: str,
     column: str,
-    secondary_column: Optional[str] = None,
+    secondary_column: str | None = None,
 ) -> bytes:
     """Render one of the supported chart types and return PNG bytes.
 
@@ -104,25 +101,5 @@ def create_chart(
         ax.text(0.5, 0.5, f"Unknown chart type: {chart_type}",
                 ha="center", va="center", transform=ax.transAxes)
 
-    plt.tight_layout()
-    return _to_bytes(fig)
-
-
-def create_regression_chart(
-    x_values,
-    y_values,
-    predictions,
-    x_col: str,
-    y_col: str,
-) -> bytes:
-    """Scatter plot with fitted regression line."""
-    fig, ax = plt.subplots(figsize=(10, 5))
-    sns.set_theme(style="darkgrid")
-    sns.scatterplot(x=x_values, y=y_values, label="Observed", ax=ax, alpha=0.7)
-    ax.plot(x_values, predictions, color="crimson", linewidth=2, label="Regression Line")
-    ax.set_xlabel(x_col)
-    ax.set_ylabel(y_col)
-    ax.set_title(f"Linear Regression — {x_col} vs {y_col}")
-    ax.legend()
     plt.tight_layout()
     return _to_bytes(fig)

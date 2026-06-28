@@ -1,17 +1,24 @@
-from typing import Optional
 from .base import LLMProvider
 
 
 class OllamaProvider(LLMProvider):
     """Local LLM via Ollama (https://ollama.ai).
 
-    Supports any model available through `ollama pull`, e.g.:
-      llama3.1:8b, mistral:7b, phi3:mini, gemma2:2b, qwen2.5:7b
+    Supports any model pulled locally, e.g.:
+      ollama pull phi3:mini | llama3.1:8b | mistral:7b | gemma2:2b
     """
 
-    def __init__(self, model: str = "llama3.1:8b", host: str = "http://localhost:11434"):
+    def __init__(
+        self,
+        model: str = "llama3.1:8b",
+        host: str = "http://localhost:11434",
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+    ):
         self.model = model
         self.host = host
+        self.temperature = temperature
+        self.max_tokens = max_tokens
         self._client = None
 
     def _get_client(self):
@@ -20,19 +27,20 @@ class OllamaProvider(LLMProvider):
                 import ollama
                 self._client = ollama.Client(host=self.host)
             except ImportError:
-                raise ImportError(
-                    "The 'ollama' package is required. Install it with: pip install ollama"
-                )
+                raise ImportError("Install the ollama package: pip install ollama")
         return self._client
 
-    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        client = self._get_client()
+    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model=self.model, messages=messages)
-        return response["message"]["content"]
+        response = self._get_client().chat(
+            model=self.model,
+            messages=messages,
+            options={"temperature": self.temperature, "num_predict": self.max_tokens},
+        )
+        return response.message.content
 
     def is_available(self) -> bool:
         try:
@@ -45,7 +53,7 @@ class OllamaProvider(LLMProvider):
         """Return names of models already pulled locally."""
         try:
             result = self._get_client().list()
-            return [m["name"] for m in result.get("models", [])]
+            return [m.model for m in result.models]
         except Exception:
             return []
 

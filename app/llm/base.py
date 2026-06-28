@@ -1,22 +1,21 @@
 from abc import ABC, abstractmethod
-from typing import Optional
 
 
 class LLMProvider(ABC):
-    """Abstract base class for all LLM backends."""
+    """Abstract base for LLM backends. Implement generate() and is_available()."""
 
     @abstractmethod
-    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
         """Send a prompt and return the model's text response."""
 
     @abstractmethod
     def is_available(self) -> bool:
-        """Check whether the backend is reachable and ready."""
+        """Return True if the backend is reachable and ready."""
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """Human-readable name shown in the UI."""
+        """Human-readable name shown in the UI (e.g. 'Ollama — phi3:mini')."""
 
     def answer_question(self, question: str, data_context: str) -> str:
         system = (

@@ -1,0 +1,38 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #0b0c10;
+  --surface: #13151c;
+  --border:  #1e2130;
+  --accent:  #5b6cff;
+  --accent2: #7c87ff;
+  --amber:   #d8a44e;
+  --green:   #4ec77f;
+  --red:     #e05252;
+  --text:    #e8eaf0;
+  --muted:   #7a7f99;
+  --ff-ui:   'Hanken Grotesk', system-ui, sans-serif;
+  --ff-mono: 'JetBrains Mono', monospace;
+  --sidebar: 248px;
+  --topbar:  56px;
+  --radius:  8px;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--ff-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+button { cursor: pointer; border: none; background: none; font-family: inherit; font-size: inherit; color: inherit; }
+input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; outline: none; }
+a { color: inherit; text-decoration: none; }
