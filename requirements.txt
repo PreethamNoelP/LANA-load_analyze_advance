@@ -1,0 +1,40 @@
+# ── Core UI ───────────────────────────────────────────────────────────────────
+streamlit>=1.33.0
+streamlit-lottie>=0.0.5
+
+# ── Data handling ─────────────────────────────────────────────────────────────
+pandas>=2.2.0
+numpy>=1.26.0
+openpyxl>=3.1.0          # Excel support
+sqlalchemy>=2.0.0         # SQL database connections
+
+# ── Machine learning ──────────────────────────────────────────────────────────
+scikit-learn>=1.4.0
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# ── Export ────────────────────────────────────────────────────────────────────
+fpdf>=1.7.2
+python-docx>=1.1.0
+
+# ── LLM backends (install what you need) ─────────────────────────────────────
+# Local via Ollama — install Ollama from https://ollama.ai then pull a model:
+#   ollama pull llama3.1:8b
+ollama>=0.3.0
+
+# OpenAI-compatible APIs (Groq, LM Studio, Together.ai, Fireworks, etc.)
+openai>=1.0.0
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+firebase-admin>=6.4.0     # Optional — remove if not using Firebase auth
+bcrypt>=4.1.2
+python-dotenv>=1.0.1
+
+# ── Optional: PDF loading ─────────────────────────────────────────────────────
+# pdfplumber>=0.10.0      # Uncomment to enable PDF ingestion
+
+# ── Optional: RAG / Vector store ─────────────────────────────────────────────
+# chromadb>=0.5.0
+# sentence-transformers>=3.0.0
