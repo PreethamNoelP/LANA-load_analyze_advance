@@ -122,13 +122,4 @@ const labelStyle = {
   fontSize: 11, fontWeight: 600, color: 'var(--muted)',
   letterSpacing: '0.06em', textTransform: 'uppercase',
 }
-const selectStyle = {
-  background: 'var(--surface)',
-  border: '1px solid var(--border)',
-  borderRadius: 8,
-  padding: '8px 12px',
-  color: 'var(--text)',
-  fontSize: 13,
-  minWidth: 160,
-  cursor: 'pointer',
-}
+const selectStyle = { fontSize: 13 }
