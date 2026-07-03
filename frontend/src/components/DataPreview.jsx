@@ -32,8 +32,8 @@ export default function DataPreview({ preview, columns }) {
         </span>
       </div>
 
-      {/* Table */}
-      <div style={{ overflowX: 'auto' }}>
+      {/* Table — max-height gives rows their own scroll; overflowX handles wide tables */}
+      <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 260 }}>
         <table style={{
           width: '100%', borderCollapse: 'collapse',
           fontSize: 12, fontFamily: 'var(--ff-mono)',
