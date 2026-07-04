@@ -424,7 +424,7 @@ MIT — see [LICENSE](LICENSE) for details.
 *Building tools that make data accessible to everyone.*
 
 [![GitHub](https://img.shields.io/badge/GitHub-PreethamNoelP-181717?style=flat-square&logo=github)](https://github.com/PreethamNoelP)
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0A66C2?style=flat-square&logo=linkedin)](https://linkedin.com/in/preetham-noel)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0A66C2?style=flat-square&logo=linkedin)](https://www.linkedin.com/in/preethamnoelp/)
 
 </div>
 
