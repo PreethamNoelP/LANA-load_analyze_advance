@@ -8,10 +8,12 @@ import AskAI from './components/AskAI.jsx'
 import Visualize from './components/Visualize.jsx'
 import Analyze from './components/Analyze.jsx'
 import Export from './components/Export.jsx'
+import Clean from './components/Clean.jsx'
 import { getModels, queryAI } from './api.js'
 
 const TABS = [
   { id: 'askai',     label: 'Ask AI' },
+  { id: 'clean',     label: 'Clean' },
   { id: 'visualize', label: 'Visualize' },
   { id: 'analyze',   label: 'Analyze' },
   { id: 'export',    label: 'Export' },
@@ -30,6 +32,8 @@ export default function App() {
   const [tab, setTab]                 = useState('askai')
   const [models, setModels]           = useState([])
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [cleanVersion,  setCleanVersion]  = useState('original')
+  const [hasCleanedData, setHasCleanedData] = useState(false)
 
   // AskAI state — lifted here so messages survive tab switches
   // and so we can control the fixed-input / scrollable-messages split
@@ -42,10 +46,12 @@ export default function App() {
     getModels().then(d => setModels(d.models || [])).catch(() => {})
   }, [])
 
-  // Reset conversation when a new dataset is loaded
+  // Reset per-session state when a new dataset is loaded
   useEffect(() => {
     setAiMessages([])
     setAiInput('')
+    setCleanVersion('original')
+    setHasCleanedData(false)
   }, [session?.session_id])
 
   // Auto-scroll the AI thread to the latest message
@@ -117,6 +123,17 @@ export default function App() {
                 <span style={s.fileMeta}>
                   {session.rows.toLocaleString()} rows · {session.columns.length} cols
                 </span>
+                {hasCleanedData && (
+                  <span style={{
+                    fontSize: 11, fontWeight: 600,
+                    color: cleanVersion === 'cleaned' ? 'var(--green)' : 'var(--muted)',
+                    background: cleanVersion === 'cleaned' ? 'rgba(78,199,127,0.12)' : 'rgba(255,255,255,0.05)',
+                    border: `1px solid ${cleanVersion === 'cleaned' ? 'rgba(78,199,127,0.3)' : 'var(--border)'}`,
+                    borderRadius: 20, padding: '3px 10px',
+                  }}>
+                    {cleanVersion === 'cleaned' ? '✓ Cleaned' : 'Original'}
+                  </span>
+                )}
                 <button style={s.previewBtn} onClick={() => setPreviewOpen(o => !o)}>
                   {previewOpen ? '↑ Hide preview' : '↓ Show preview'}
                 </button>
@@ -198,6 +215,15 @@ export default function App() {
             <div style={{ display: tab !== 'askai' ? 'flex' : 'none', flex: 1, minHeight: 0, overflowY: 'auto', flexDirection: 'column', padding: '24px 32px' }}>
               <KpiTiles session={session} />
               {previewOpen && <div style={{ marginTop: 16 }}><DataPreview preview={session.preview} columns={session.columns} /></div>}
+              <div style={{ marginTop: 24, display: tab === 'clean' ? 'block' : 'none' }}>
+                <Clean
+                  session={session}
+                  cleanVersion={cleanVersion}
+                  hasCleanedData={hasCleanedData}
+                  onCleanApplied={() => { setHasCleanedData(true); setCleanVersion('cleaned') }}
+                  onVersionChange={v => setCleanVersion(v)}
+                />
+              </div>
               <div style={{ marginTop: 24, display: tab === 'visualize' ? 'block' : 'none' }}>
                 <Visualize session={session} />
               </div>

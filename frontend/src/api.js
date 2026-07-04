@@ -55,3 +55,27 @@ export async function getModels() {
 export function exportCsvUrl(sessionId)  { return `${BASE}/export/csv/${sessionId}` }
 export function exportPdfUrl(sessionId)  { return `${BASE}/export/pdf/${sessionId}` }
 export function exportDocxUrl(sessionId) { return `${BASE}/export/docx/${sessionId}` }
+
+export async function getCleanPreview(sessionId) {
+  return ok(await fetch(`${BASE}/clean/preview/${sessionId}`))
+}
+
+export async function applyClean(sessionId, operations) {
+  return ok(await fetch(`${BASE}/clean/apply/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ operations }),
+  }))
+}
+
+export async function switchVersion(sessionId, version) {
+  return ok(await fetch(`${BASE}/clean/version/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  }))
+}
+
+export async function getCleanStatus(sessionId) {
+  return ok(await fetch(`${BASE}/clean/status/${sessionId}`))
+}
