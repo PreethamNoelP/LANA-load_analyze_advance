@@ -30,7 +30,11 @@ LANA is a **local-first AI data analysis platform** — upload any dataset, ask 
 
 | Landing Page | Ask AI | Analyze |
 |:---:|:---:|:---:|
-| *screenshot* | *screenshot* | *screenshot* |
+| ![Landing](docs/screenshots/landing.png) | ![Ask AI](docs/screenshots/askai.png) | ![Analyze](docs/screenshots/analyze.png) |
+
+| Visualize | Export |
+|:---:|:---:|
+| ![Visualize](docs/screenshots/visualize.png) | ![Export](docs/screenshots/export.png) |
 
 </div>
 
