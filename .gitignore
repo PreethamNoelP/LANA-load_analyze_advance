@@ -15,10 +15,11 @@ __pycache__/
 # Chat sessions
 chats/
 
-# Generated plots
-*.png
+# Generated plots (export outputs — but allow docs/screenshots/)
 *.pdf
 *.docx
+*.png
+!docs/**/*.png
 
 # OS files
 .DS_Store
