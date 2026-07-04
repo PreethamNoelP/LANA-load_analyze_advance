@@ -34,9 +34,16 @@ app.add_middleware(
 )
 
 _sessions: dict[str, pd.DataFrame] = {}
+_cleaned_sessions: dict[str, pd.DataFrame] = {}
+_active_version: dict[str, str] = {}  # 'original' | 'cleaned'
 
 
 def _session(sid: str) -> pd.DataFrame:
+    """Return the currently active DataFrame for a session (original or cleaned)."""
+    if _active_version.get(sid) == 'cleaned':
+        df = _cleaned_sessions.get(sid)
+        if df is not None:
+            return df
     df = _sessions.get(sid)
     if df is None:
         raise HTTPException(404, "Session not found — upload a dataset first.")
@@ -99,6 +106,21 @@ async def upload(file: UploadFile = File(...)):
 class QueryReq(BaseModel):
     session_id: str
     question: str
+
+
+class CleanOperation(BaseModel):
+    type: str
+    column: str | None = None
+    method: str | None = None
+    mapping: dict | None = None
+
+
+class CleanReq(BaseModel):
+    operations: list[CleanOperation]
+
+
+class VersionReq(BaseModel):
+    version: str
 
 
 @app.post("/query")
@@ -202,3 +224,67 @@ def export_docx(session_id: str):
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": 'attachment; filename="lana_report.docx"'},
     )
+
+
+# ── Cleaning endpoints ────────────────────────────────────────────────────────
+
+@app.get("/clean/preview/{session_id}")
+def clean_preview(session_id: str):
+    """Detect data quality issues in the original DataFrame without modifying it."""
+    df = _sessions.get(session_id)
+    if df is None:
+        raise HTTPException(404, "Session not found — upload a dataset first.")
+    from app.data.cleaner import detect_issues
+    return detect_issues(df)
+
+
+@app.post("/clean/apply/{session_id}")
+def clean_apply(session_id: str, req: CleanReq):
+    """Apply selected cleaning operations and store the result as the cleaned version."""
+    df = _sessions.get(session_id)
+    if df is None:
+        raise HTTPException(404, "Session not found — upload a dataset first.")
+    from app.data.cleaner import apply_cleaning
+    ops_dicts = [op.model_dump(exclude_none=True) for op in req.operations]
+    cleaned = apply_cleaning(df, ops_dicts)
+    if len(cleaned) == 0:
+        raise HTTPException(400, "Cleaning would remove all rows. Relax your settings and try again.")
+    _cleaned_sessions[session_id] = cleaned
+    _active_version[session_id] = 'cleaned'
+    return {
+        "rows_before": len(df),
+        "rows_after": len(cleaned),
+        "rows_removed": len(df) - len(cleaned),
+        "columns_before": len(df.columns),
+        "columns_after": len(cleaned.columns),
+    }
+
+
+@app.post("/clean/version/{session_id}")
+def set_version(session_id: str, req: VersionReq):
+    """Switch the active version (original or cleaned) for all downstream endpoints."""
+    if session_id not in _sessions:
+        raise HTTPException(404, "Session not found — upload a dataset first.")
+    if req.version not in ("original", "cleaned"):
+        raise HTTPException(400, "version must be 'original' or 'cleaned'.")
+    if req.version == "cleaned" and session_id not in _cleaned_sessions:
+        raise HTTPException(400, "No cleaned version available. Apply cleaning first.")
+    _active_version[session_id] = req.version
+    return {"version": req.version}
+
+
+@app.get("/clean/status/{session_id}")
+def clean_status(session_id: str):
+    """Return whether a cleaned version exists and which version is currently active."""
+    if session_id not in _sessions:
+        raise HTTPException(404, "Session not found — upload a dataset first.")
+    has_cleaned = session_id in _cleaned_sessions
+    version = _active_version.get(session_id, "original")
+    result: dict = {
+        "version": version,
+        "has_cleaned": has_cleaned,
+        "original_rows": len(_sessions[session_id]),
+    }
+    if has_cleaned:
+        result["cleaned_rows"] = len(_cleaned_sessions[session_id])
+    return result
