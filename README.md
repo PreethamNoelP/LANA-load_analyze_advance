@@ -4,7 +4,7 @@
 
 ### Ask your data anything. Fully local. Zero cloud dependency.
 
-LANA is a **local-first AI data analysis platform** — upload any dataset, ask questions in plain English, and get AI-powered insights, interactive visualizations, and polished reports. Everything runs on your machine.
+LANA is a **local-first AI data analysis platform** — upload any dataset, clean it, ask questions in plain English, and get AI-powered insights, interactive visualizations, and polished reports. Everything runs on your machine.
 
 <br/>
 
@@ -24,7 +24,7 @@ LANA is a **local-first AI data analysis platform** — upload any dataset, ask 
 
 ## 📷 Demo
 
-> **Upload → Ask → Visualize → Export** — all in under 60 seconds.
+> **Upload → Clean → Ask → Visualize → Export** — all in under 60 seconds.
 
 <div align="center">
 
@@ -59,7 +59,7 @@ For individuals, researchers, and organizations handling sensitive data — **no
 LANA takes a different approach: **bring the AI to the data, not the data to the AI.**
 
 - A **FastAPI backend** wraps production-grade Python analysis modules (pandas, scikit-learn, seaborn) into a clean REST API.
-- A **React frontend** delivers a ChatGPT-style interface — upload, ask, visualize, export — with zero configuration.
+- A **React frontend** delivers a ChatGPT-style interface — upload, clean, ask, visualize, export — with zero configuration.
 - An **Ollama integration** runs open-source LLMs (Llama 3, Phi-3, Mistral, Gemma) fully locally — **zero data leaves your machine**.
 
 The result: enterprise-quality data analysis with the simplicity of a chat interface, running entirely offline.
@@ -71,6 +71,7 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 | Feature | Description |
 |---|---|
 | 🗂️ **Multi-format Upload** | Drag-and-drop CSV, Excel (`.xlsx`/`.xls`), and JSON. Instant schema detection. |
+| 🧹 **Data Cleaning** | Auto-detect duplicates, missing values, outliers, and text inconsistencies. Preview changes before applying. Toggle between original and cleaned views. |
 | 🤖 **Natural Language Queries** | Ask plain-English questions. LANA builds structured context from your dataset and queries a local LLM. |
 | 📊 **9 Chart Types** | Histogram, Line, Bar, Scatter, Box, Heatmap, Violin, Pie, Area — rendered server-side as crisp PNGs. |
 | 📐 **Descriptive Statistics** | Count, mean, median, std, variance, IQR, skewness, kurtosis, and more — per column. |
@@ -85,38 +86,43 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 ## 🏗️ Architecture / System Design
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Browser  (React 18 + Vite)                   │
-│                                                                  │
-│  Landing Page → Upload → [Ask AI | Visualize | Analyze | Export] │
-│                              ↕  fetch /api/*                     │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │  Vite dev proxy  :5173 → :8000
-                               ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    FastAPI  (Uvicorn ASGI)                        │
-│                                                                  │
-│  POST /upload     →  pandas.read_csv/excel/json                  │
-│                   →  _sessions[uuid] = DataFrame                 │
-│                                                                  │
-│  POST /query      →  generate_context(df)                        │
-│                   →  LLMProvider.answer_question()               │
-│                                                                  │
-│  POST /chart      →  create_chart(df, type, col)  → PNG bytes   │
-│  GET  /stats      →  compute_statistics(series)   → JSON        │
-│  POST /regression →  perform_linear_regression()  → JSON        │
-│  GET  /export/*   →  generate_pdf / generate_word / df.to_csv() │
-└──────────┬──────────────────────────┬────────────────────────────┘
-           │                          │
-           ↓                          ↓
-┌─────────────────┐        ┌─────────────────────────┐
-│   app/llm/      │        │  app/analysis/           │
-│                 │        │  app/visualization/      │
-│  OllamaProvider │        │  app/export/             │
-│  OpenAICompat   │        │                          │
-│  Provider       │        │  pandas · scikit-learn   │
-│  (ABC pattern)  │        │  seaborn · fpdf · docx   │
-└──────┬──────────┘        └─────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                      Browser  (React 18 + Vite)                       │
+│                                                                       │
+│  Landing → Upload → [Ask AI | Clean | Visualize | Analyze | Export]  │
+│                              ↕  fetch /api/*                          │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │  Vite dev proxy  :5173 → :8000
+                                ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│                     FastAPI  (Uvicorn ASGI)                            │
+│                                                                       │
+│  POST /upload          →  pandas.read_csv/excel/json                  │
+│                        →  _sessions[uuid] = DataFrame                 │
+│                                                                       │
+│  GET  /clean/preview   →  detect_issues(df)  → JSON                  │
+│  POST /clean/apply     →  apply_cleaning(df, ops) → cleaned df        │
+│  POST /clean/version   →  switch active view (original/cleaned)       │
+│                                                                       │
+│  POST /query           →  generate_context(df)                        │
+│                        →  LLMProvider.answer_question()               │
+│                                                                       │
+│  POST /chart           →  create_chart(df, type, col) → PNG bytes    │
+│  GET  /stats           →  compute_statistics(series)  → JSON         │
+│  POST /regression      →  perform_linear_regression() → JSON         │
+│  GET  /export/*        →  generate_pdf / generate_word / df.to_csv() │
+└──────────┬───────────────────────────┬───────────────────────────────┘
+           │                           │
+           ↓                           ↓
+┌─────────────────┐        ┌──────────────────────────┐
+│   app/llm/      │        │  app/analysis/            │
+│                 │        │  app/data/                │
+│  OllamaProvider │        │  app/visualization/       │
+│  OpenAICompat   │        │  app/export/              │
+│  Provider       │        │                           │
+│  (ABC pattern)  │        │  pandas · scikit-learn    │
+│                 │        │  seaborn · fpdf · docx    │
+└──────┬──────────┘        └──────────────────────────┘
        │
        ↓
 ┌──────────────────┐
@@ -131,7 +137,8 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 
 **Key design decisions:**
 
-- **In-memory session store** (`dict[uuid, DataFrame]`) — zero-latency reads for local use. Clean upgrade path to Redis for multi-user deployment.
+- **In-memory session store** (`dict[uuid, DataFrame]`) — zero-latency reads, zero dependencies, right for local single-user use.
+- **Dual-session design** — `_sessions` holds the original DataFrame; `_cleaned_sessions` holds the cleaned version. `_session()` transparently returns whichever is active, so all downstream endpoints work without changes.
 - **Server-side chart rendering** — matplotlib/seaborn runs on the backend; the frontend receives PNG bytes. No JavaScript charting library, consistent quality.
 - **LLMProvider ABC** — a pluggable interface makes swapping local ↔ cloud LLMs a single `.env` change.
 - **Structured LLM context** — `generate_context()` builds a rich text summary (column types, null rates, sample rows, stats ranges) before every query, dramatically improving answer grounding.
@@ -153,7 +160,7 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 |---|---|---|
 | 🚀 | FastAPI | Async REST API framework |
 | 🦄 | Uvicorn | ASGI production server |
-| 🐼 | pandas | Data loading and manipulation |
+| 🐼 | pandas | Data loading, manipulation, and cleaning |
 | 🔢 | NumPy | Numeric computation |
 | 🤖 | scikit-learn | Linear regression (OLS) |
 | 📊 | matplotlib + seaborn | Server-side chart rendering |
@@ -181,7 +188,25 @@ User drops CSV/Excel/JSON
 → Frontend receives: rows, columns, numeric_columns, 8-row preview
 ```
 
-**Step 2 — Context Generation**
+**Step 2 — Data Cleaning (optional)**
+```
+LANA scans the original DataFrame and reports:
+→ Duplicate rows (count + sample)
+→ Missing values per column (null count, % of total, suggested fill)
+→ Outliers per numeric column (IQR method: Q1−1.5×IQR, Q3+1.5×IQR)
+→ Text inconsistencies (same value in different cases, e.g. "Yes"/"yes"/"YES")
+
+User configures operations per-column:
+→ Fill nulls: mean / median / mode / zero / drop rows
+→ Remove outliers: toggle per column
+→ Fix text: pick canonical form per variant group
+
+Apply Cleaning stores a separate cleaned DataFrame.
+All downstream tabs (Ask AI, Visualize, Analyze, Export) use whichever
+version is active. The original is always preserved and switchable.
+```
+
+**Step 3 — Context Generation**
 ```
 Every AI query triggers generate_context(df):
 → Column names + inferred dtypes
@@ -191,7 +216,7 @@ Every AI query triggers generate_context(df):
 This context is prepended to the user's question before the LLM call.
 ```
 
-**Step 3 — LLM Query**
+**Step 4 — LLM Query**
 ```
 User question + structured context → Ollama (local inference)
 → Model reads the dataset summary, understands shape and content
@@ -199,7 +224,7 @@ User question + structured context → Ollama (local inference)
 → No hallucination about columns that don't exist
 ```
 
-**Step 4 — Visualization**
+**Step 5 — Visualization**
 ```
 User picks chart type + column
 → POST /chart → FastAPI runs matplotlib/seaborn
@@ -207,7 +232,7 @@ User picks chart type + column
 → Frontend creates a blob URL and renders the image inline
 ```
 
-**Step 5 — Statistical Analysis**
+**Step 6 — Statistical Analysis**
 ```
 Statistics:  pandas Series → 15-metric profile (count, mean, median,
              std, variance, IQR, skewness, kurtosis, percentiles…)
@@ -216,7 +241,7 @@ Regression:  scikit-learn OLS → R² score, coefficient, intercept, RMSE
              + auto-generated plain-English model interpretation
 ```
 
-**Step 6 — Export**
+**Step 7 — Export**
 ```
 CSV   → df.to_csv() streamed as a file download
 PDF   → fpdf2 builds a formatted report with dataset summary
@@ -310,23 +335,29 @@ Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 ```
 1. Drop a CSV, Excel, or JSON file on the upload screen
    → KPI tiles: row count, column count, numeric/text split
-   → Toggle "Show preview" to inspect raw data with internal scroll
+   → Toggle "Show preview" to inspect raw data
 
 2. Ask AI — ChatGPT-style interface
-   → "What are the outliers in CPU Change?"
+   → "What are the outliers in this column?"
    → "Which feature correlates most with execution time?"
    → Click suggestion chips to start instantly
    → Messages survive tab switches — context is never lost
 
-3. Visualize
+3. Clean (optional, recommended before analysis)
+   → Auto-scan detects duplicates, nulls, outliers, text inconsistencies
+   → Configure what to fix per column
+   → Apply Cleaning — original is preserved, toggle between views
+   → All tabs automatically use the active version
+
+4. Visualize
    → Select chart type and column → Generate chart
    → Scatter Plot: pick X and Y columns independently
 
-4. Analyze
+5. Analyze
    → Statistics: pick any numeric column → 15-metric profile
    → Regression: pick X and Y columns → R², coefficient, RMSE + interpretation
 
-5. Export
+6. Export
    → CSV: raw data download
    → PDF: formatted analysis report
    → DOCX: editable Word document
@@ -356,6 +387,7 @@ Restart the backend — no other changes required.
 | Export formats | CSV, PDF, DOCX |
 | Chart types | 9 |
 | Statistical metrics per column | 15 |
+| Cleaning operations | Dedup, null fill, IQR outlier removal, text normalization |
 | Data privacy | 100% — zero external network calls |
 
 ---
@@ -374,8 +406,8 @@ A ChatGPT-style fixed-input / scrollable-thread layout inside nested flex contai
 **LLM context quality**
 Feeding raw DataFrame strings to the LLM produced unreliable answers. Structured context generation (`generate_context()`) — column types, null rates, sample rows, stat ranges — dramatically improved grounding and reduced hallucination.
 
-**Session management without a database**
-In-memory `dict[uuid, DataFrame]` is zero-setup and sufficient for local single-user use. Designed with a clean upgrade path: swap the dict for a Redis-backed store to support multi-user, persistent sessions.
+**Non-destructive data cleaning**
+Storing a separate cleaned DataFrame alongside the original (rather than mutating in place) lets users toggle between versions at any point. The key insight: `_session()` acts as a transparent router — all existing endpoints get the right version without knowing about cleaning at all.
 
 ---
 
@@ -386,9 +418,7 @@ In-memory `dict[uuid, DataFrame]` is zero-setup and sufficient for local single-
 - [ ] **Persistent sessions** — save and reload analysis sessions via SQLite
 - [ ] **SQL query generation** — LLM writes and executes pandas queries directly on the DataFrame
 - [ ] **Auto-correlation insights** — surface the strongest correlations with plain-English summaries
-- [ ] **Auth + multi-user** — JWT auth layer + Redis session store for team deployment
 - [ ] **Docker Compose** — single-command startup for the full stack
-- [ ] **Model benchmarking panel** — side-by-side comparison of answers from multiple local models
 
 ---
 
@@ -407,6 +437,7 @@ git checkout -b feature/your-feature-name
 - New chart types → `app/visualization/charts.py`
 - New export formats → `app/export/exporters.py`
 - New LLM providers → `app/llm/`
+- Additional cleaning operations → `app/data/cleaner.py`
 - Frontend UX improvements → `frontend/src/components/`
 
 Please open an issue before large changes.
