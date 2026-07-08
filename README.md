@@ -411,17 +411,6 @@ Storing a separate cleaned DataFrame alongside the original (rather than mutatin
 
 ---
 
-## 🚀 Future Improvements
-
-- [ ] **Streaming LLM responses** — token-by-token output via SSE for faster perceived latency
-- [ ] **Multi-dataset joins** — upload two files, ask questions across both with pandas merge
-- [ ] **Persistent sessions** — save and reload analysis sessions via SQLite
-- [ ] **SQL query generation** — LLM writes and executes pandas queries directly on the DataFrame
-- [ ] **Auto-correlation insights** — surface the strongest correlations with plain-English summaries
-- [ ] **Docker Compose** — single-command startup for the full stack
-
----
-
 ## 🤝 Contributing
 
 Contributions are welcome.
