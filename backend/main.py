@@ -5,6 +5,7 @@ import uuid
 import math
 from collections import OrderedDict
 from pathlib import Path
+from typing import Literal
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
@@ -140,9 +141,11 @@ class QueryReq(BaseModel):
 
 
 class CleanOperation(BaseModel):
-    type: str
+    # Must match the operations implemented in app/data/cleaner.py — unknown
+    # values are rejected with 422 instead of silently doing nothing.
+    type: Literal["remove_duplicates", "fill_nulls", "remove_outliers", "normalize", "fix_text"]
     column: str | None = None
-    method: str | None = None
+    method: Literal["mean", "median", "zero", "mode", "drop", "minmax", "zscore"] | None = None
     mapping: dict | None = None
 
 
