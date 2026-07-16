@@ -3,6 +3,7 @@ import io
 import uuid
 import math
 from pathlib import Path
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,6 +52,8 @@ def _session(sid: str) -> pd.DataFrame:
 
 
 def _clean(val):
+    if isinstance(val, np.generic):
+        val = val.item()
     if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
         return None
     return val
