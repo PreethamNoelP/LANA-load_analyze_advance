@@ -2,6 +2,8 @@
 
 import io
 
+import matplotlib
+matplotlib.use("Agg")  # headless backend — GUI backends break in server threads
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
