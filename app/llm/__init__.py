@@ -11,6 +11,7 @@ def get_provider() -> LLMProvider:
             host=config.llm.ollama_host,
             temperature=config.llm.temperature,
             max_tokens=config.llm.max_tokens,
+            timeout=config.llm.timeout,
         )
     elif config.llm.provider == "openai_compat":
         return OpenAICompatProvider(
@@ -19,6 +20,7 @@ def get_provider() -> LLMProvider:
             api_key=config.llm.openai_compat_api_key,
             temperature=config.llm.temperature,
             max_tokens=config.llm.max_tokens,
+            timeout=config.llm.timeout,
         )
     else:
         raise ValueError(

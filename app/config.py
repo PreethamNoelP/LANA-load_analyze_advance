@@ -14,6 +14,7 @@ class LLMConfig:
     openai_compat_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_COMPAT_API_KEY", ""))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.3")))
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "2048")))
+    timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "90")))
 
 
 @dataclass

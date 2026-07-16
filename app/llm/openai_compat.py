@@ -20,19 +20,27 @@ class OpenAICompatProvider(LLMProvider):
         api_key: str = "",
         temperature: float = 0.3,
         max_tokens: int = 2048,
+        timeout: float = 90.0,
     ):
         self.model = model
         self.base_url = base_url
         self._api_key = api_key
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.timeout = timeout
         self._client = None
 
     def _get_client(self):
         if self._client is None:
             try:
                 from openai import OpenAI
-                self._client = OpenAI(base_url=self.base_url, api_key=self._api_key)
+                # Local endpoints (LM Studio etc.) need no key, but the SDK
+                # refuses an empty one — send a placeholder instead.
+                self._client = OpenAI(
+                    base_url=self.base_url,
+                    api_key=self._api_key or "not-needed",
+                    timeout=self.timeout,
+                )
             except ImportError:
                 raise ImportError("Install the openai package: pip install openai")
         return self._client

@@ -14,18 +14,20 @@ class OllamaProvider(LLMProvider):
         host: str = "http://localhost:11434",
         temperature: float = 0.3,
         max_tokens: int = 2048,
+        timeout: float = 90.0,
     ):
         self.model = model
         self.host = host
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.timeout = timeout
         self._client = None
 
     def _get_client(self):
         if self._client is None:
             try:
                 import ollama
-                self._client = ollama.Client(host=self.host)
+                self._client = ollama.Client(host=self.host, timeout=self.timeout)
             except ImportError:
                 raise ImportError("Install the ollama package: pip install ollama")
         return self._client
