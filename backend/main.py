@@ -1,5 +1,6 @@
 import sys
 import io
+import os
 import uuid
 import math
 from pathlib import Path
@@ -33,6 +34,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+MAX_UPLOAD_MB = int(os.getenv("LANA_MAX_UPLOAD_MB", "200"))
 
 _sessions: dict[str, pd.DataFrame] = {}
 _cleaned_sessions: dict[str, pd.DataFrame] = {}
@@ -73,6 +76,12 @@ def health():
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
     content = await file.read()
+    if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(
+            413,
+            f"File is too large ({len(content) / 1024 / 1024:.0f} MB). "
+            f"The limit is {MAX_UPLOAD_MB} MB (set LANA_MAX_UPLOAD_MB to change it).",
+        )
     ext = Path(file.filename).suffix.lower()
     buf = io.BytesIO(content)
 
