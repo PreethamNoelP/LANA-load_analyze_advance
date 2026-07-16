@@ -1,35 +1,38 @@
+# Pinned to the exact versions the app is developed and tested against.
+# To upgrade: bump a pin, run the test suite, and commit the new pin.
+
 # ── Backend API ───────────────────────────────────────────────────────────────
-fastapi>=0.111.0
-uvicorn[standard]>=0.29.0
-python-multipart>=0.0.9
+fastapi==0.138.1
+uvicorn[standard]==0.49.0
+python-multipart==0.0.32
 
 # ── Data handling ─────────────────────────────────────────────────────────────
-pandas>=2.2.0
-numpy>=1.26.0
-openpyxl>=3.1.0          # Excel support
-defusedxml>=0.7.1        # hardens openpyxl against XML entity-expansion attacks
+pandas==3.0.4
+numpy==2.4.6
+openpyxl==3.1.5          # Excel support
+defusedxml==0.7.1        # hardens openpyxl against XML entity-expansion attacks
 
 # ── Machine learning ──────────────────────────────────────────────────────────
-scikit-learn>=1.4.0
+scikit-learn==1.9.0
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
-matplotlib>=3.8.0
-seaborn>=0.13.0
+matplotlib==3.11.0
+seaborn==0.13.2
 
 # ── Export ────────────────────────────────────────────────────────────────────
-fpdf>=1.7.2
-python-docx>=1.1.0
+fpdf==1.7.2
+python-docx==1.2.0
 
 # ── LLM backends (install what you need) ─────────────────────────────────────
 # Local via Ollama — install Ollama from https://ollama.ai then pull a model:
 #   ollama pull llama3.1:8b
-ollama>=0.3.0
+ollama==0.6.2
 
 # OpenAI-compatible APIs (Groq, LM Studio, Together.ai, Fireworks, etc.)
-openai>=1.0.0
+openai==2.44.0
 
 # ── Config ────────────────────────────────────────────────────────────────────
-python-dotenv>=1.0.1
+python-dotenv==1.2.2
 
 # ── Optional: PDF loading ─────────────────────────────────────────────────────
 # pdfplumber>=0.10.0      # Uncomment to enable PDF ingestion
