@@ -9,7 +9,7 @@ import Visualize from './components/Visualize.jsx'
 import Analyze from './components/Analyze.jsx'
 import Export from './components/Export.jsx'
 import Clean from './components/Clean.jsx'
-import { getModels, queryAI } from './api.js'
+import { getModels, queryAI, getSessionInfo } from './api.js'
 
 const TABS = [
   { id: 'askai',     label: 'Ask AI' },
@@ -60,6 +60,19 @@ export default function App() {
       aiScrollRef.current.scrollTop = aiScrollRef.current.scrollHeight
     }
   }, [aiMessages])
+
+  // Re-sync rows/columns/preview with the active version on the backend
+  // so KPI tiles and the preview reflect cleaned data after apply/switch.
+  async function refreshSession() {
+    if (!session) return
+    try {
+      const info = await getSessionInfo(session.session_id)
+      setSession(cur =>
+        cur?.session_id === info.session_id ? { ...cur, ...info } : cur)
+    } catch {
+      // keep showing the last known metadata if the refresh fails
+    }
+  }
 
   async function sendAI(q) {
     const question = (q ?? aiInput).trim()
@@ -220,8 +233,8 @@ export default function App() {
                   session={session}
                   cleanVersion={cleanVersion}
                   hasCleanedData={hasCleanedData}
-                  onCleanApplied={() => { setHasCleanedData(true); setCleanVersion('cleaned') }}
-                  onVersionChange={v => setCleanVersion(v)}
+                  onCleanApplied={() => { setHasCleanedData(true); setCleanVersion('cleaned'); refreshSession() }}
+                  onVersionChange={v => { setCleanVersion(v); refreshSession() }}
                 />
               </div>
               <div style={{ marginTop: 24, display: tab === 'visualize' ? 'block' : 'none' }}>

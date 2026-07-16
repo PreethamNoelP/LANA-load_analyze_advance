@@ -14,6 +14,10 @@ export async function uploadFile(file) {
   return ok(await fetch(`${BASE}/upload`, { method: 'POST', body: form }))
 }
 
+export async function getSessionInfo(sessionId) {
+  return ok(await fetch(`${BASE}/session/${sessionId}`))
+}
+
 export async function queryAI(sessionId, question) {
   return ok(await fetch(`${BASE}/query`, {
     method: 'POST',

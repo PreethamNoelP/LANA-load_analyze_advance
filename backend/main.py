@@ -135,6 +135,19 @@ async def upload(file: UploadFile = File(...)):
     }
 
 
+@app.get("/session/{session_id}")
+def session_info(session_id: str):
+    """Metadata + preview for the currently active version (original or cleaned)."""
+    df = _session(session_id)
+    return {
+        "session_id": session_id,
+        "rows": len(df),
+        "columns": df.columns.tolist(),
+        "numeric_columns": df.select_dtypes("number").columns.tolist(),
+        "preview": [_clean_record(r) for r in df.head(8).to_dict(orient="records")],
+    }
+
+
 class QueryReq(BaseModel):
     session_id: str
     question: str
