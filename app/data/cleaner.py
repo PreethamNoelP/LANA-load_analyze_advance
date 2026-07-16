@@ -77,8 +77,9 @@ def detect_issues(df: pd.DataFrame) -> dict:
         issues["outliers"] = outlier_info
 
     # ── 4. Text inconsistencies (case/whitespace variants of the same value) ──
+    # "str" is pandas 3's default text dtype; "object" still covers mixed columns.
     text_issues: dict = {}
-    for col in df.select_dtypes(include="object").columns:
+    for col in df.select_dtypes(include=["object", "str"]).columns:
         series = df[col].dropna().astype(str)
         if series.empty:
             continue

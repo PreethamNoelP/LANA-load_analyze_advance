@@ -71,7 +71,7 @@ def generate_context(df: pd.DataFrame) -> str:
 def generate_recommendations(df: pd.DataFrame) -> dict[str, list[str]]:
     """Suggest chart types and analyses suited to the uploaded dataset."""
     numeric_cols = df.select_dtypes("number").columns.tolist()
-    cat_cols = df.select_dtypes(["object", "category"]).columns.tolist()
+    cat_cols = df.select_dtypes(["object", "str", "category"]).columns.tolist()
 
     viz: list[str] = []
     if numeric_cols:
