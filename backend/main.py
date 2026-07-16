@@ -3,6 +3,7 @@ import io
 import os
 import uuid
 import math
+from collections import OrderedDict
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -36,21 +37,39 @@ app.add_middleware(
 )
 
 MAX_UPLOAD_MB = int(os.getenv("LANA_MAX_UPLOAD_MB", "200"))
+MAX_SESSIONS = int(os.getenv("LANA_MAX_SESSIONS", "5"))
 
-_sessions: dict[str, pd.DataFrame] = {}
+_sessions: OrderedDict[str, pd.DataFrame] = OrderedDict()
 _cleaned_sessions: dict[str, pd.DataFrame] = {}
 _active_version: dict[str, str] = {}  # 'original' | 'cleaned'
 
 
-def _session(sid: str) -> pd.DataFrame:
-    """Return the currently active DataFrame for a session (original or cleaned)."""
-    if _active_version.get(sid) == 'cleaned':
-        df = _cleaned_sessions.get(sid)
-        if df is not None:
-            return df
+def _store_session(sid: str, df: pd.DataFrame) -> None:
+    """Store a new session; evict the least recently used beyond MAX_SESSIONS."""
+    _sessions[sid] = df
+    _sessions.move_to_end(sid)
+    while len(_sessions) > MAX_SESSIONS:
+        old, _ = _sessions.popitem(last=False)
+        _cleaned_sessions.pop(old, None)
+        _active_version.pop(old, None)
+
+
+def _original(sid: str) -> pd.DataFrame:
+    """Return the original uploaded DataFrame, marking the session recently used."""
     df = _sessions.get(sid)
     if df is None:
         raise HTTPException(404, "Session not found — upload a dataset first.")
+    _sessions.move_to_end(sid)
+    return df
+
+
+def _session(sid: str) -> pd.DataFrame:
+    """Return the currently active DataFrame for a session (original or cleaned)."""
+    df = _original(sid)
+    if _active_version.get(sid) == 'cleaned':
+        cleaned = _cleaned_sessions.get(sid)
+        if cleaned is not None:
+            return cleaned
     return df
 
 
@@ -100,7 +119,7 @@ async def upload(file: UploadFile = File(...)):
         raise HTTPException(400, f"Could not parse file: {e}")
 
     sid = str(uuid.uuid4())
-    _sessions[sid] = df
+    _store_session(sid, df)
 
     numeric_cols = df.select_dtypes("number").columns.tolist()
     preview = [_clean_record(r) for r in df.head(8).to_dict(orient="records")]
@@ -249,9 +268,7 @@ def export_docx(session_id: str):
 @app.get("/clean/preview/{session_id}")
 def clean_preview(session_id: str):
     """Detect data quality issues in the original DataFrame without modifying it."""
-    df = _sessions.get(session_id)
-    if df is None:
-        raise HTTPException(404, "Session not found — upload a dataset first.")
+    df = _original(session_id)
     from app.data.cleaner import detect_issues
     return detect_issues(df)
 
@@ -259,9 +276,7 @@ def clean_preview(session_id: str):
 @app.post("/clean/apply/{session_id}")
 def clean_apply(session_id: str, req: CleanReq):
     """Apply selected cleaning operations and store the result as the cleaned version."""
-    df = _sessions.get(session_id)
-    if df is None:
-        raise HTTPException(404, "Session not found — upload a dataset first.")
+    df = _original(session_id)
     from app.data.cleaner import apply_cleaning
     ops_dicts = [op.model_dump(exclude_none=True) for op in req.operations]
     cleaned = apply_cleaning(df, ops_dicts)
