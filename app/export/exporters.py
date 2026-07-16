@@ -2,7 +2,17 @@ import io
 
 import pandas as pd
 from fpdf import FPDF
+from fpdf.enums import XPos, YPos
 from docx import Document
+
+
+def _pdf_text(text: str) -> str:
+    """Make text safe for fpdf2's built-in core fonts (latin-1 only).
+
+    Characters outside latin-1 are replaced with '?' instead of crashing
+    the export. Swap the core font for a Unicode TTF to lift this limit.
+    """
+    return str(text).encode("latin-1", "replace").decode("latin-1")
 
 
 def generate_pdf_report(df: pd.DataFrame, context: str) -> bytes:
@@ -11,42 +21,46 @@ def generate_pdf_report(df: pd.DataFrame, context: str) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    pdf.set_font("Arial", "B", 18)
-    pdf.cell(0, 12, "LANA Analysis Report", ln=True, align="C")
+    pdf.set_font("helvetica", "B", 18)
+    pdf.cell(0, 12, "LANA Analysis Report", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(4)
 
-    pdf.set_font("Arial", "B", 13)
-    pdf.cell(0, 9, "Dataset Overview", ln=True)
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 7, f"  Rows: {len(df):,}", ln=True)
-    pdf.cell(0, 7, f"  Columns: {len(df.columns)}", ln=True)
-    pdf.cell(0, 7, f"  Column names: {', '.join(df.columns.tolist())}", ln=True)
+    pdf.set_font("helvetica", "B", 13)
+    pdf.cell(0, 9, "Dataset Overview", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 7, f"  Rows: {len(df):,}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 7, f"  Columns: {len(df.columns)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.multi_cell(0, 7, _pdf_text(f"  Column names: {', '.join(df.columns.tolist())}"),
+                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(3)
 
-    pdf.set_font("Arial", "B", 13)
-    pdf.cell(0, 9, "Data Profile", ln=True)
-    pdf.set_font("Arial", "", 9)
+    pdf.set_font("helvetica", "B", 13)
+    pdf.cell(0, 9, "Data Profile", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("helvetica", "", 9)
     for line in context.splitlines():
-        pdf.multi_cell(0, 5, f"  {line}")
+        pdf.multi_cell(0, 5, _pdf_text(f"  {line}"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(3)
 
     numeric_cols = df.select_dtypes("number").columns.tolist()
     if numeric_cols:
-        pdf.set_font("Arial", "B", 13)
-        pdf.cell(0, 9, "Numeric Column Summary", ln=True)
-        pdf.set_font("Arial", "", 9)
+        pdf.set_font("helvetica", "B", 13)
+        pdf.cell(0, 9, "Numeric Column Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_font("helvetica", "", 9)
         for col in numeric_cols:
             s = df[col].dropna()
             pdf.multi_cell(
                 0, 5,
-                f"  {col}: "
-                f"mean={s.mean():.4g}, std={s.std():.4g}, "
-                f"min={s.min():.4g}, max={s.max():.4g}, "
-                f"nulls={df[col].isnull().sum()}"
+                _pdf_text(
+                    f"  {col}: "
+                    f"mean={s.mean():.4g}, std={s.std():.4g}, "
+                    f"min={s.min():.4g}, max={s.max():.4g}, "
+                    f"nulls={df[col].isnull().sum()}"
+                ),
+                new_x=XPos.LMARGIN, new_y=YPos.NEXT,
             )
         pdf.ln(3)
 
-    return pdf.output(dest="S").encode("latin-1")
+    return bytes(pdf.output())
 
 
 def generate_word_report(df: pd.DataFrame, context: str) -> bytes:

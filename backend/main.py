@@ -220,7 +220,10 @@ def export_pdf(session_id: str):
     if not EXPORT_OK:
         raise HTTPException(501, "Export dependencies not installed.")
     df = _session(session_id)
-    pdf = generate_pdf_report(df, generate_context(df))
+    try:
+        pdf = generate_pdf_report(df, generate_context(df))
+    except Exception as e:
+        raise HTTPException(500, f"PDF generation failed: {e}")
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": 'attachment; filename="lana_report.pdf"'})
 
@@ -230,7 +233,10 @@ def export_docx(session_id: str):
     if not EXPORT_OK:
         raise HTTPException(501, "Export dependencies not installed.")
     df = _session(session_id)
-    docx = generate_word_report(df, generate_context(df))
+    try:
+        docx = generate_word_report(df, generate_context(df))
+    except Exception as e:
+        raise HTTPException(500, f"Word report generation failed: {e}")
     return Response(
         content=docx,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
