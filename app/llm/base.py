@@ -1,4 +1,11 @@
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+
+ANSWER_SYSTEM_PROMPT = (
+    "You are a data analyst assistant. "
+    "Answer the user's question using only the dataset context provided. "
+    "Be concise, factual, and highlight key numbers when relevant."
+)
 
 
 class LLMProvider(ABC):
@@ -7,6 +14,10 @@ class LLMProvider(ABC):
     @abstractmethod
     def generate(self, prompt: str, system_prompt: str | None = None) -> str:
         """Send a prompt and return the model's text response."""
+
+    @abstractmethod
+    def generate_stream(self, prompt: str, system_prompt: str | None = None) -> Iterator[str]:
+        """Send a prompt and yield the model's response incrementally, chunk by chunk."""
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -18,10 +29,9 @@ class LLMProvider(ABC):
         """Human-readable name shown in the UI (e.g. 'Ollama — phi3:mini')."""
 
     def answer_question(self, question: str, data_context: str) -> str:
-        system = (
-            "You are a data analyst assistant. "
-            "Answer the user's question using only the dataset context provided. "
-            "Be concise, factual, and highlight key numbers when relevant."
-        )
         prompt = f"Dataset context:\n{data_context}\n\nQuestion: {question}"
-        return self.generate(prompt, system_prompt=system)
+        return self.generate(prompt, system_prompt=ANSWER_SYSTEM_PROMPT)
+
+    def answer_question_stream(self, question: str, data_context: str) -> Iterator[str]:
+        prompt = f"Dataset context:\n{data_context}\n\nQuestion: {question}"
+        yield from self.generate_stream(prompt, system_prompt=ANSWER_SYSTEM_PROMPT)

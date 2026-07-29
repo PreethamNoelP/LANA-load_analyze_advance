@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+
 from .base import LLMProvider
 
 
@@ -43,6 +45,22 @@ class OllamaProvider(LLMProvider):
             options={"temperature": self.temperature, "num_predict": self.max_tokens},
         )
         return response.message.content
+
+    def generate_stream(self, prompt: str, system_prompt: str | None = None) -> Iterator[str]:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        stream = self._get_client().chat(
+            model=self.model,
+            messages=messages,
+            options={"temperature": self.temperature, "num_predict": self.max_tokens},
+            stream=True,
+        )
+        for chunk in stream:
+            content = chunk.message.content
+            if content:
+                yield content
 
     def is_available(self) -> bool:
         try:

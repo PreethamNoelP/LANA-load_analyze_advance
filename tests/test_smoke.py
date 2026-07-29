@@ -6,6 +6,8 @@ session store limits. No LLM required — /query is exercised only indirectly
 via the context builder used by exports.
 """
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -150,6 +152,62 @@ def test_exports_handle_non_latin1_data(client):
 
 
 # ── Analysis ──────────────────────────────────────────────────────────────────
+
+def _sse_events(response_text):
+    return [json.loads(line[len("data: "):]) for line in response_text.strip().split("\n\n") if line]
+
+
+def test_query_stream_endpoint(client, monkeypatch):
+    sid = upload(client)["session_id"]
+
+    class _FakeProvider:
+        def answer_question_stream(self, question, data_context):
+            yield "Hello "
+            yield "world"
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _FakeProvider())
+    r = client.post("/query/stream", json={"session_id": sid, "question": "hi"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert _sse_events(r.text) == [{"delta": "Hello "}, {"delta": "world"}, {"done": True}]
+
+
+def test_query_stream_reports_llm_errors_as_sse_event(client, monkeypatch):
+    sid = upload(client)["session_id"]
+
+    class _FailingProvider:
+        def answer_question_stream(self, question, data_context):
+            yield "partial "
+            raise RuntimeError("model unreachable")
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _FailingProvider())
+    r = client.post("/query/stream", json={"session_id": sid, "question": "hi"})
+    assert r.status_code == 200  # headers already sent; error travels inside the stream
+    events = _sse_events(r.text)
+    assert events[0] == {"delta": "partial "}
+    assert "model unreachable" in events[1]["error"]
+
+
+def test_query_stream_rejects_unknown_session(client):
+    assert client.post("/query/stream", json={"session_id": "nope", "question": "hi"}).status_code == 404
+
+
+def test_correlation_endpoint(client):
+    sid = upload(client)["session_id"]
+    r = client.get(f"/correlation/{sid}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["method"] == "pearson"
+    pair = next(p for p in body["pairs"] if {p["column_a"], p["column_b"]} == {"score", "price"})
+    assert -1.0 <= pair["correlation"] <= 1.0
+    assert pair["n"] == 4  # one row has a null price, dropped for this pair
+
+    r = client.get(f"/correlation/{sid}", params={"method": "spearman"})
+    assert r.status_code == 200 and r.json()["method"] == "spearman"
+
+    assert client.get(f"/correlation/{sid}", params={"method": "bogus"}).status_code == 422
+    assert client.get("/correlation/not-a-session").status_code == 404
+
 
 def test_regression_endpoint(client):
     sid = upload(client)["session_id"]

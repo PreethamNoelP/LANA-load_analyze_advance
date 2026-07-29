@@ -1,5 +1,6 @@
 import sys
 import io
+import json
 import os
 import uuid
 import math
@@ -10,14 +11,21 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app.config import config
 from app.llm import get_provider
 from app.llm.ollama_provider import OllamaProvider
-from app.analysis.statistics import compute_statistics, generate_context, generate_recommendations
+from app.analysis.statistics import (
+    compute_statistics,
+    compute_correlations,
+    generate_context,
+    generate_recommendations,
+)
 from app.analysis.regression import perform_linear_regression
 from app.visualization.charts import create_chart
 
@@ -31,7 +39,7 @@ app = FastAPI(title="LANA API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=config.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,6 +94,14 @@ def _clean_record(rec: dict) -> dict:
     return {k: _clean(v) for k, v in rec.items()}
 
 
+def _parse_dataframe(ext: str, buf: io.BytesIO) -> pd.DataFrame:
+    if ext == ".csv":
+        return pd.read_csv(buf)
+    if ext in (".xlsx", ".xls"):
+        return pd.read_excel(buf)
+    return pd.read_json(buf)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -103,19 +119,15 @@ async def upload(file: UploadFile = File(...)):
             f"The limit is {MAX_UPLOAD_MB} MB (set LANA_MAX_UPLOAD_MB to change it).",
         )
     ext = Path(file.filename).suffix.lower()
+    if ext not in (".csv", ".xlsx", ".xls", ".json"):
+        raise HTTPException(400, f"Unsupported type '{ext}'. Use CSV, Excel, or JSON.")
     buf = io.BytesIO(content)
 
     try:
-        if ext == ".csv":
-            df = pd.read_csv(buf)
-        elif ext in (".xlsx", ".xls"):
-            df = pd.read_excel(buf)
-        elif ext == ".json":
-            df = pd.read_json(buf)
-        else:
-            raise HTTPException(400, f"Unsupported type '{ext}'. Use CSV, Excel, or JSON.")
-    except HTTPException:
-        raise
+        # Parsing runs in a worker thread — pandas' readers are synchronous
+        # and can take seconds on large files, which would otherwise block
+        # every other request sharing this process's event loop.
+        df = await run_in_threadpool(_parse_dataframe, ext, buf)
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
 
@@ -182,6 +194,34 @@ def query(req: QueryReq):
     return {"answer": answer}
 
 
+def _sse_event(payload: dict) -> str:
+    # JSON-encoding the payload (rather than writing the raw chunk after
+    # "data: ") keeps embedded newlines/quotes from breaking SSE framing.
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _query_stream_gen(df: pd.DataFrame, question: str):
+    context = generate_context(df)
+    try:
+        provider = get_provider()
+        for chunk in provider.answer_question_stream(question, context):
+            yield _sse_event({"delta": chunk})
+    except Exception as e:
+        yield _sse_event({"error": f"LLM error: {e}"})
+        return
+    yield _sse_event({"done": True})
+
+
+@app.post("/query/stream")
+def query_stream(req: QueryReq):
+    df = _session(req.session_id)
+    return StreamingResponse(
+        _query_stream_gen(df, req.question),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/stats/{session_id}")
 def stats(session_id: str, column: str = Query(...)):
     df = _session(session_id)
@@ -191,6 +231,13 @@ def stats(session_id: str, column: str = Query(...)):
     if not pd.api.types.is_numeric_dtype(s):
         raise HTTPException(400, f"Column '{column}' is not numeric.")
     return {k: _clean(v) for k, v in compute_statistics(s).items()}
+
+
+@app.get("/correlation/{session_id}")
+def correlation(session_id: str, method: Literal["pearson", "spearman"] = Query("pearson")):
+    df = _session(session_id)
+    pairs = compute_correlations(df, method=method)
+    return {"method": method, "pairs": [{k: _clean(v) for k, v in p.items()} for p in pairs]}
 
 
 class RegressionReq(BaseModel):

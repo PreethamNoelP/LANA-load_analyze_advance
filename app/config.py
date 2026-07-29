@@ -17,9 +17,26 @@ class LLMConfig:
     timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "90")))
 
 
+_DEFAULT_ALLOWED_ORIGINS = ["http://localhost:5173", "http://localhost:3000"]
+
+
+def _parse_allowed_origins() -> list[str]:
+    raw = os.getenv("LANA_ALLOWED_ORIGINS", "")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if "*" in origins:
+        raise ValueError(
+            "LANA_ALLOWED_ORIGINS cannot include '*' — the API is served with "
+            "allow_credentials=True, and browsers reject a wildcard origin "
+            "combined with credentials. List explicit origins instead, e.g. "
+            "LANA_ALLOWED_ORIGINS=https://your-app.example.com"
+        )
+    return origins or list(_DEFAULT_ALLOWED_ORIGINS)
+
+
 @dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
+    allowed_origins: list[str] = field(default_factory=_parse_allowed_origins)
 
 
 config = AppConfig()

@@ -1,6 +1,9 @@
-from typing import Any
+import warnings
+from itertools import combinations
+from typing import Any, Literal
 
 import pandas as pd
+from scipy import stats as scipy_stats
 
 
 def compute_statistics(series: pd.Series) -> dict[str, Any]:
@@ -36,6 +39,47 @@ def compute_statistics(series: pd.Series) -> dict[str, Any]:
         })
 
     return stats
+
+
+def compute_correlations(
+    df: pd.DataFrame,
+    method: Literal["pearson", "spearman"] = "pearson",
+) -> list[dict[str, Any]]:
+    """Pairwise correlation between every numeric column pair, ranked by strength.
+
+    Rows with a null in either column of a pair are dropped before computing
+    that pair's correlation (pairwise deletion), so `n` can differ per pair.
+    Pairs with fewer than 2 overlapping values, or a constant column (zero
+    variance, undefined correlation), are skipped.
+    """
+    numeric_cols = df.select_dtypes("number").columns.tolist()
+    corr_fn = scipy_stats.spearmanr if method == "spearman" else scipy_stats.pearsonr
+
+    results: list[dict[str, Any]] = []
+    for col_a, col_b in combinations(numeric_cols, 2):
+        pair = df[[col_a, col_b]].dropna()
+        if len(pair) < 2:
+            continue
+        try:
+            # A constant column has undefined correlation — scipy warns and
+            # returns nan, which we filter out below anyway.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=scipy_stats.ConstantInputWarning)
+                correlation, p_value = corr_fn(pair[col_a], pair[col_b])
+        except Exception:
+            continue
+        if pd.isna(correlation):
+            continue
+        results.append({
+            "column_a": col_a,
+            "column_b": col_b,
+            "correlation": round(float(correlation), 4),
+            "p_value": round(float(p_value), 6),
+            "n": int(len(pair)),
+        })
+
+    results.sort(key=lambda r: abs(r["correlation"]), reverse=True)
+    return results
 
 
 def generate_context(df: pd.DataFrame) -> str:

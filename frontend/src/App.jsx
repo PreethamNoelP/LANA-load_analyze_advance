@@ -9,7 +9,7 @@ import Visualize from './components/Visualize.jsx'
 import Analyze from './components/Analyze.jsx'
 import Export from './components/Export.jsx'
 import Clean from './components/Clean.jsx'
-import { getModels, queryAI, getSessionInfo } from './api.js'
+import { getModels, streamQuery, getSessionInfo } from './api.js'
 
 const TABS = [
   { id: 'askai',     label: 'Ask AI' },
@@ -82,7 +82,12 @@ export default function App() {
     const id = Date.now()
     setAiMessages(prev => [...prev, { id, q: question, loading: true }])
     try {
-      const { answer } = await queryAI(session.session_id, question)
+      let answer = ''
+      for await (const delta of streamQuery(session.session_id, question)) {
+        answer += delta
+        setAiMessages(prev => prev.map(m => m.id === id ? { ...m, loading: false, a: answer } : m))
+      }
+      // Covers an empty-but-successful stream (no deltas emitted) — still clear "loading".
       setAiMessages(prev => prev.map(m => m.id === id ? { ...m, loading: false, a: answer } : m))
     } catch (e) {
       setAiMessages(prev => prev.map(m => m.id === id ? { ...m, loading: false, error: e.message } : m))

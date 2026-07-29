@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+
 from .base import LLMProvider
 
 
@@ -57,6 +59,23 @@ class OpenAICompatProvider(LLMProvider):
             max_tokens=self.max_tokens,
         )
         return response.choices[0].message.content
+
+    def generate_stream(self, prompt: str, system_prompt: str | None = None) -> Iterator[str]:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        stream = self._get_client().chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            stream=True,
+        )
+        for chunk in stream:
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
 
     def is_available(self) -> bool:
         try:

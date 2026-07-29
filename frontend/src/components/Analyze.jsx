@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { getStats, runRegression } from '../api.js'
+import { getStats, runRegression, getCorrelations } from '../api.js'
 
 function StatTable({ stats }) {
   if (!stats) return null
@@ -87,6 +87,61 @@ function RegressionResult({ result }) {
   )
 }
 
+function CorrelationTable({ pairs }) {
+  if (!pairs) return null
+  if (!pairs.length) {
+    return (
+      <div style={{ color: 'var(--muted)', fontSize: 13, padding: '4px 0' }}>
+        Not enough numeric columns (or overlapping data) to compute correlations.
+      </div>
+    )
+  }
+  const strengthColor = (c) => {
+    const a = Math.abs(c)
+    return a > 0.7 ? 'var(--green)' : a > 0.4 ? 'var(--amber)' : 'var(--muted)'
+  }
+  return (
+    <div style={{
+      background: 'var(--surface)',
+      border: '1px solid var(--border)',
+      borderRadius: 10,
+      overflow: 'hidden',
+    }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+        <thead>
+          <tr style={{ borderBottom: '1px solid var(--border)' }}>
+            {['Columns', 'Correlation', 'p-value', 'n'].map(h => (
+              <th key={h} style={{
+                textAlign: 'left', padding: '9px 16px',
+                color: 'var(--muted)', fontWeight: 600,
+                fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase',
+              }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {pairs.map((p, i) => (
+            <tr key={`${p.column_a}-${p.column_b}`} style={{ borderBottom: i < pairs.length - 1 ? '1px solid var(--border)' : 'none' }}>
+              <td style={{ padding: '9px 16px', color: 'var(--text)', fontWeight: 500 }}>
+                {p.column_a} <span style={{ color: 'var(--muted)' }}>×</span> {p.column_b}
+              </td>
+              <td style={{ padding: '9px 16px', fontFamily: 'var(--ff-mono)', fontWeight: 600, color: strengthColor(p.correlation) }}>
+                {p.correlation.toFixed(4)}
+              </td>
+              <td style={{ padding: '9px 16px', fontFamily: 'var(--ff-mono)', color: 'var(--muted)' }}>
+                {p.p_value < 0.0001 ? '<0.0001' : p.p_value.toFixed(4)}
+              </td>
+              <td style={{ padding: '9px 16px', fontFamily: 'var(--ff-mono)', color: 'var(--muted)' }}>
+                {p.n.toLocaleString()}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export default function Analyze({ session }) {
   const numCols = session.numeric_columns || []
   const [statsCol, setStatsCol] = useState(numCols[0] || '')
@@ -99,6 +154,11 @@ export default function Analyze({ session }) {
   const [regression, setRegression] = useState(null)
   const [regLoading, setRegLoading] = useState(false)
   const [regErr, setRegErr] = useState(null)
+
+  const [corrMethod, setCorrMethod] = useState('pearson')
+  const [correlations, setCorrelations] = useState(null)
+  const [corrLoading, setCorrLoading] = useState(false)
+  const [corrErr, setCorrErr] = useState(null)
 
   async function fetchStats() {
     setStatsErr(null)
@@ -126,6 +186,19 @@ export default function Analyze({ session }) {
     }
   }
 
+  async function fetchCorrelations() {
+    setCorrErr(null)
+    setCorrLoading(true)
+    try {
+      const data = await getCorrelations(session.session_id, corrMethod)
+      setCorrelations(data.pairs)
+    } catch (e) {
+      setCorrErr(e.message)
+    } finally {
+      setCorrLoading(false)
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
       {/* Statistics */}
@@ -144,6 +217,25 @@ export default function Analyze({ session }) {
         </div>
         {statsErr && <ErrorBox msg={statsErr} />}
         <StatTable stats={stats} />
+      </section>
+
+      {/* Correlations */}
+      <section>
+        <div style={sectionHeader}>Correlations</div>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div style={fieldWrap}>
+            <label style={labelStyle}>Method</label>
+            <select value={corrMethod} onChange={e => setCorrMethod(e.target.value)} style={selectStyle}>
+              <option value="pearson">Pearson (linear)</option>
+              <option value="spearman">Spearman (rank)</option>
+            </select>
+          </div>
+          <button onClick={fetchCorrelations} disabled={corrLoading} style={btnStyle(corrLoading)}>
+            {corrLoading ? 'Computing…' : 'Compute correlations'}
+          </button>
+        </div>
+        {corrErr && <ErrorBox msg={corrErr} />}
+        <CorrelationTable pairs={correlations} />
       </section>
 
       {/* Regression */}
