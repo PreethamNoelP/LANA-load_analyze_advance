@@ -116,6 +116,63 @@ def test_clean_rejects_unknown_operation(client):
     assert r.status_code == 422
 
 
+def test_clean_preview_reports_column_types(client):
+    sid = upload(client)["session_id"]
+    issues = client.get(f"/clean/preview/{sid}").json()
+    assert issues["column_types"]["score"] == "int64"
+    assert issues["column_types"]["price"] == "float64"
+    assert "name" in issues["column_types"]
+
+
+def test_cast_type_changes_column_dtype(client):
+    sid = upload(client)["session_id"]
+    assert "score" in client.get(f"/session/{sid}").json()["numeric_columns"]
+
+    r = client.post(f"/clean/apply/{sid}", json={"operations": [
+        {"type": "cast_type", "column": "score", "dtype": "text"},
+    ]})
+    assert r.status_code == 200
+
+    assert "score" not in client.get(f"/session/{sid}").json()["numeric_columns"]
+
+
+def test_cast_type_numeric_coerces_invalid_values_to_null(client):
+    # "name" is all non-numeric text — coercing to numeric should null every
+    # value out, not crash, and the column should now count as numeric.
+    sid = upload(client)["session_id"]
+    r = client.post(f"/clean/apply/{sid}", json={"operations": [
+        {"type": "cast_type", "column": "name", "dtype": "numeric"},
+    ]})
+    assert r.status_code == 200, r.text
+
+    after = client.get(f"/session/{sid}").json()
+    assert "name" in after["numeric_columns"]
+    assert all(row["name"] is None for row in after["preview"])
+
+
+def test_cast_type_datetime_and_category_serialize_cleanly(client):
+    csv = b"event,day\nA,2024-01-15\nB,2024-02-01\nC,not-a-date\n"
+    sid = upload(client, csv, "dates.csv")["session_id"]
+
+    r = client.post(f"/clean/apply/{sid}", json={"operations": [
+        {"type": "cast_type", "column": "day", "dtype": "datetime"},
+        {"type": "cast_type", "column": "event", "dtype": "category"},
+    ]})
+    assert r.status_code == 200, r.text
+
+    days = [row["day"] for row in client.get(f"/session/{sid}").json()["preview"]]
+    assert days[0].startswith("2024-01-15")
+    assert days[2] is None  # "not-a-date" coerced to null, not left as garbage
+
+
+def test_cast_type_rejects_unknown_dtype(client):
+    sid = upload(client)["session_id"]
+    r = client.post(f"/clean/apply/{sid}", json={"operations": [
+        {"type": "cast_type", "column": "name", "dtype": "bogus"},
+    ]})
+    assert r.status_code == 422
+
+
 def test_version_endpoint_validates_input(client):
     sid = upload(client)["session_id"]
     assert client.post(f"/clean/version/{sid}", json={"version": "bogus"}).status_code == 400

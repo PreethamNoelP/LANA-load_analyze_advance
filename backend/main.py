@@ -85,6 +85,9 @@ def _session(sid: str) -> pd.DataFrame:
 def _clean(val):
     if isinstance(val, np.generic):
         val = val.item()
+    # `==` is unsafe here — pd.NaT == pd.NaT is False by design — so use `is`.
+    if val is pd.NaT or val is pd.NA:
+        return None
     if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
         return None
     return val
@@ -168,10 +171,11 @@ class QueryReq(BaseModel):
 class CleanOperation(BaseModel):
     # Must match the operations implemented in app/data/cleaner.py — unknown
     # values are rejected with 422 instead of silently doing nothing.
-    type: Literal["remove_duplicates", "fill_nulls", "remove_outliers", "normalize", "fix_text"]
+    type: Literal["remove_duplicates", "fill_nulls", "remove_outliers", "normalize", "fix_text", "cast_type"]
     column: str | None = None
     method: Literal["mean", "median", "zero", "mode", "drop", "minmax", "zscore"] | None = None
     mapping: dict | None = None
+    dtype: Literal["numeric", "datetime", "category", "text"] | None = None
 
 
 class CleanReq(BaseModel):

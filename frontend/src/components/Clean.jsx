@@ -199,6 +199,49 @@ function TextSection({ info, ops, onOpsChange }) {
   )
 }
 
+/* ── Section: Column Types (schema override) ────────────────────────────── */
+
+function friendlyDtype(dtype) {
+  if (dtype.startsWith('int') || dtype.startsWith('float')) return 'Number'
+  if (dtype === 'bool') return 'Boolean'
+  if (dtype === 'category') return 'Category'
+  if (dtype.startsWith('datetime')) return 'Date/Time'
+  if (dtype === 'object' || dtype === 'str' || dtype === 'string') return 'Text'
+  return dtype
+}
+
+function SchemaSection({ columnTypes, ops, onOpsChange }) {
+  const entries = Object.entries(columnTypes)
+  return (
+    <SectionCard icon="⌗" title="Column Types" badge={`${entries.length} columns`}>
+      <p style={s.hint}>
+        Override a column's type before analysis — useful when a date or category column was read in as plain text.
+      </p>
+      <div style={s.colList}>
+        {entries.map(([col, dtype]) => (
+          <div key={col} style={s.colRow}>
+            <div style={s.colName}>
+              <span style={s.colLabel}>{col}</span>
+              <span style={s.colSub}>currently {friendlyDtype(dtype)}</span>
+            </div>
+            <select
+              value={ops[col] || ''}
+              onChange={e => onOpsChange(col, e.target.value)}
+              style={s.select}
+            >
+              <option value="">Keep as is</option>
+              <option value="text">Text</option>
+              <option value="numeric">Number</option>
+              <option value="category">Category</option>
+              <option value="datetime">Date/Time</option>
+            </select>
+          </div>
+        ))}
+      </div>
+    </SectionCard>
+  )
+}
+
 /* ── Result Banner ───────────────────────────────────────────────────────── */
 
 function ResultBanner({ result, version, onVersionSwitch }) {
@@ -246,6 +289,7 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
   const [nullOps,      setNullOps]      = useState({})
   const [outlierOps,   setOutlierOps]   = useState({})
   const [textOps,      setTextOps]      = useState({})
+  const [schemaOps,    setSchemaOps]    = useState({})
 
   useEffect(() => {
     if (!session) return
@@ -260,6 +304,7 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
     setNullOps({})
     setOutlierOps({})
     setTextOps({})
+    setSchemaOps({})
     try {
       const data = await getCleanPreview(session.session_id)
       setIssues(data)
@@ -295,6 +340,14 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
 
   function buildOps() {
     const ops = []
+
+    // Type casts run first, so a later fill_nulls/remove_outliers in the same
+    // Apply already sees the corrected dtype (e.g. cast to Number, then mean-fill).
+    if (issues?.column_types) {
+      Object.entries(schemaOps).forEach(([col, dtype]) => {
+        if (dtype) ops.push({ type: 'cast_type', column: col, dtype })
+      })
+    }
 
     if (removeDupes && issues?.duplicates) {
       ops.push({ type: 'remove_duplicates' })
@@ -404,6 +457,15 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
         </div>
       )}
 
+      {/* Column types — independent of issue detection, always available */}
+      {!loading && issues?.column_types && (
+        <SchemaSection
+          columnTypes={issues.column_types}
+          ops={schemaOps}
+          onOpsChange={(col, dtype) => setSchemaOps(prev => ({ ...prev, [col]: dtype }))}
+        />
+      )}
+
       {/* No issues */}
       {!loading && !error && issues && issueCount === 0 && (
         <div style={s.cleanCard}>
@@ -454,27 +516,29 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
               }
             />
           )}
-
-          {/* Apply bar */}
-          <div style={s.applyBar}>
-            <span style={{ fontSize: 13, color: 'var(--muted)' }}>
-              {hasOps
-                ? `${activeOps.length} operation${activeOps.length !== 1 ? 's' : ''} selected`
-                : 'Select at least one operation above'}
-            </span>
-            <button
-              onClick={handleApply}
-              disabled={!hasOps || applying}
-              style={{
-                ...s.applyBtn,
-                background: hasOps && !applying ? 'var(--accent)' : 'var(--border)',
-                cursor: hasOps && !applying ? 'pointer' : 'default',
-              }}
-            >
-              {applying ? 'Applying…' : result ? 'Re-apply' : 'Apply Cleaning'}
-            </button>
-          </div>
         </>
+      )}
+
+      {/* Apply bar — available whenever a schema override or a detected issue can be acted on */}
+      {!loading && issues && (
+        <div style={s.applyBar}>
+          <span style={{ fontSize: 13, color: 'var(--muted)' }}>
+            {hasOps
+              ? `${activeOps.length} operation${activeOps.length !== 1 ? 's' : ''} selected`
+              : 'Select at least one operation above'}
+          </span>
+          <button
+            onClick={handleApply}
+            disabled={!hasOps || applying}
+            style={{
+              ...s.applyBtn,
+              background: hasOps && !applying ? 'var(--accent)' : 'var(--border)',
+              cursor: hasOps && !applying ? 'pointer' : 'default',
+            }}
+          >
+            {applying ? 'Applying…' : result ? 'Re-apply' : 'Apply Cleaning'}
+          </button>
+        </div>
       )}
     </div>
   )

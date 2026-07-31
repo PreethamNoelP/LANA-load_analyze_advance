@@ -18,6 +18,12 @@ def detect_issues(df: pd.DataFrame) -> dict:
     """Scan a DataFrame and return a structured map of data quality issues."""
     issues: dict = {}
 
+    # ── 0. Column types ──────────────────────────────────────────────────────
+    # Not an "issue" — always reported so the UI can offer a type override
+    # (e.g. a date or category column pandas read in as plain text) before
+    # analysis, independent of whether anything else below was flagged.
+    issues["column_types"] = {col: str(dtype) for col, dtype in df.dtypes.items()}
+
     # ── 1. Duplicates ────────────────────────────────────────────────────────
     dup_count = int(df.duplicated().sum())
     if dup_count > 0:
@@ -158,5 +164,23 @@ def apply_cleaning(df: pd.DataFrame, operations: list[dict]) -> pd.DataFrame:
             mapping = op.get("mapping", {})
             if mapping:
                 result[col] = result[col].replace(mapping)
+
+        elif op_type == "cast_type" and col and col in result.columns:
+            dtype = op.get("dtype")
+            if dtype == "numeric":
+                result[col] = pd.to_numeric(result[col], errors="coerce")
+            elif dtype == "datetime":
+                result[col] = pd.to_datetime(result[col], errors="coerce")
+            elif dtype == "category":
+                result[col] = result[col].astype("category")
+            elif dtype == "text":
+                # .astype(str) alone would turn real nulls into the literal
+                # string "nan"/"NaT" — restore them to actual nulls afterward.
+                # (Assigning the whole column, not a `.loc[mask]` slice, is
+                # required for the dtype change itself to take effect at all —
+                # partial assignment tries to fit the new values back into the
+                # column's *existing* dtype instead of replacing it.)
+                notna = result[col].notna()
+                result[col] = result[col].astype(str).where(notna, None)
 
     return result
