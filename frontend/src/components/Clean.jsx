@@ -246,31 +246,43 @@ function SchemaSection({ columnTypes, ops, onOpsChange }) {
 
 function ResultBanner({ result, version, onVersionSwitch }) {
   return (
-    <div style={s.resultBanner}>
-      <div style={s.resultLeft}>
-        <span style={s.resultCheck}>✓</span>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>
-            Cleaning applied
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3, fontFamily: 'var(--ff-mono)' }}>
-            {result.rows_removed > 0
-              ? `${result.rows_before.toLocaleString()} → ${result.rows_after.toLocaleString()} rows  ·  ${result.rows_removed} removed`
-              : `${result.rows_after.toLocaleString()} rows  ·  no rows removed`}
+    <div>
+      <div style={s.resultBanner}>
+        <div style={s.resultLeft}>
+          <span style={s.resultCheck}>✓</span>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>
+              Cleaning applied
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3, fontFamily: 'var(--ff-mono)' }}>
+              {result.rows_removed > 0
+                ? `${result.rows_before.toLocaleString()} → ${result.rows_after.toLocaleString()} rows  ·  ${result.rows_removed} removed`
+                : `${result.rows_after.toLocaleString()} rows  ·  no rows removed`}
+            </div>
           </div>
         </div>
+        <div style={s.versionToggle}>
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>View:</span>
+          <button
+            style={{ ...s.vBtn, background: version === 'original' ? 'var(--surface)' : 'transparent', color: version === 'original' ? 'var(--text)' : 'var(--muted)', border: `1px solid ${version === 'original' ? 'var(--border)' : 'transparent'}` }}
+            onClick={() => onVersionSwitch('original')}
+          >Original</button>
+          <button
+            style={{ ...s.vBtn, background: version === 'cleaned' ? 'var(--accent)' : 'transparent', color: version === 'cleaned' ? '#fff' : 'var(--muted)', border: `1px solid ${version === 'cleaned' ? 'var(--accent)' : 'transparent'}` }}
+            onClick={() => onVersionSwitch('cleaned')}
+          >Cleaned</button>
+        </div>
       </div>
-      <div style={s.versionToggle}>
-        <span style={{ fontSize: 11, color: 'var(--muted)' }}>View:</span>
-        <button
-          style={{ ...s.vBtn, background: version === 'original' ? 'var(--surface)' : 'transparent', color: version === 'original' ? 'var(--text)' : 'var(--muted)', border: `1px solid ${version === 'original' ? 'var(--border)' : 'transparent'}` }}
-          onClick={() => onVersionSwitch('original')}
-        >Original</button>
-        <button
-          style={{ ...s.vBtn, background: version === 'cleaned' ? 'var(--accent)' : 'transparent', color: version === 'cleaned' ? '#fff' : 'var(--muted)', border: `1px solid ${version === 'cleaned' ? 'var(--accent)' : 'transparent'}` }}
-          onClick={() => onVersionSwitch('cleaned')}
-        >Cleaned</button>
-      </div>
+      {result.warnings?.length > 0 && (
+        <div style={s.warningsBox}>
+          {result.warnings.map((w, i) => (
+            <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: i > 0 ? 6 : 0 }}>
+              <span style={{ color: 'var(--amber)', flexShrink: 0 }}>⚠</span>
+              <span>{w}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -674,6 +686,15 @@ const s = {
     padding: '5px 14px', borderRadius: 6,
     cursor: 'pointer', fontFamily: 'var(--ff-ui)',
     transition: 'background 0.15s, color 0.15s',
+  },
+  warningsBox: {
+    padding: '12px 16px',
+    background: 'rgba(240,180,60,0.08)',
+    border: '1px solid rgba(240,180,60,0.25)',
+    borderRadius: 10,
+    marginTop: -8, marginBottom: 20,
+    fontSize: 12.5, color: 'var(--amber)',
+    lineHeight: 1.5,
   },
 
   errorBox: {

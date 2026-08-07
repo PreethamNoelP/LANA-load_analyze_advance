@@ -15,6 +15,11 @@ class LLMConfig:
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.3")))
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "2048")))
     timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "90")))
+    # Ollama's own default (2048-4096 tokens depending on model) is too small for
+    # a wide dataset's context block — raise it so the model doesn't silently
+    # drop columns instead of erroring. Ignored by the openai_compat provider,
+    # whose hosted context windows are already generous.
+    num_ctx: int = field(default_factory=lambda: int(os.getenv("LLM_NUM_CTX", "8192")))
 
 
 _DEFAULT_ALLOWED_ORIGINS = ["http://localhost:5173", "http://localhost:3000"]

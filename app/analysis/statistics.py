@@ -82,15 +82,27 @@ def compute_correlations(
     return results
 
 
+MAX_CONTEXT_COLUMNS = 40
+
+
 def generate_context(df: pd.DataFrame) -> str:
-    """Build a text description of a DataFrame to pass as LLM context."""
+    """Build a text description of a DataFrame to pass as LLM context.
+
+    Per-column detail is capped at MAX_CONTEXT_COLUMNS — beyond that, the
+    prompt grows large enough to blow past the model's context window
+    (num_ctx), which silently drops earlier columns instead of erroring.
+    The column list itself always lists every column name.
+    """
     lines = [
         f"Dataset: {len(df):,} rows × {len(df.columns)} columns.",
         f"Columns: {', '.join(df.columns)}.",
         "",
     ]
 
-    for col in df.columns:
+    detail_cols = df.columns[:MAX_CONTEXT_COLUMNS]
+    omitted = len(df.columns) - len(detail_cols)
+
+    for col in detail_cols:
         if pd.api.types.is_numeric_dtype(df[col]):
             s = df[col].dropna()
             if s.empty:
@@ -108,6 +120,9 @@ def generate_context(df: pd.DataFrame) -> str:
                 f"- '{col}' (categorical): {df[col].nunique()} unique values, "
                 f"sample={sample}, nulls={df[col].isnull().sum()}"
             )
+
+    if omitted > 0:
+        lines.append(f"\n(+{omitted} more columns not detailed here — ask about a specific one by name.)")
 
     return "\n".join(lines)
 

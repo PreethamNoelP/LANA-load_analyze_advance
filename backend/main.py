@@ -4,6 +4,7 @@ import json
 import os
 import uuid
 import math
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Literal
@@ -46,7 +47,14 @@ app.add_middleware(
 )
 
 MAX_UPLOAD_MB = int(os.getenv("LANA_MAX_UPLOAD_MB", "200"))
-MAX_SESSIONS = int(os.getenv("LANA_MAX_SESSIONS", "5"))
+MAX_SESSIONS = int(os.getenv("LANA_MAX_SESSIONS", "30"))
+
+# Caps how many LLM requests run at once — a local Ollama model serves one
+# request at a time well; without this, a burst of concurrent visitors all
+# queue behind it and every answer appears to hang.
+MAX_CONCURRENT_LLM = int(os.getenv("LANA_MAX_CONCURRENT_LLM", "2"))
+_llm_semaphore = threading.Semaphore(MAX_CONCURRENT_LLM)
+_LLM_BUSY_MSG = "The AI is busy answering other questions right now — try again in a moment."
 
 _sessions: OrderedDict[str, pd.DataFrame] = OrderedDict()
 _cleaned_sessions: dict[str, pd.DataFrame] = {}
@@ -114,16 +122,27 @@ def health():
 
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(
-            413,
-            f"File is too large ({len(content) / 1024 / 1024:.0f} MB). "
-            f"The limit is {MAX_UPLOAD_MB} MB (set LANA_MAX_UPLOAD_MB to change it).",
-        )
     ext = Path(file.filename).suffix.lower()
     if ext not in (".csv", ".xlsx", ".xls", ".json"):
         raise HTTPException(400, f"Unsupported type '{ext}'. Use CSV, Excel, or JSON.")
+
+    # Read in chunks and abort as soon as the limit is crossed, instead of
+    # buffering the entire body first — an unbounded read lets anyone with
+    # the link send an arbitrarily large file and consume bandwidth/disk
+    # before the size check ever runs.
+    limit_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    chunks = []
+    total = 0
+    while chunk := await file.read(1024 * 1024):
+        total += len(chunk)
+        if total > limit_bytes:
+            raise HTTPException(
+                413,
+                f"File exceeds the {MAX_UPLOAD_MB} MB limit "
+                f"(set LANA_MAX_UPLOAD_MB to change it).",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
     buf = io.BytesIO(content)
 
     try:
@@ -190,11 +209,15 @@ class VersionReq(BaseModel):
 def query(req: QueryReq):
     df = _session(req.session_id)
     context = generate_context(df)
+    if not _llm_semaphore.acquire(blocking=False):
+        raise HTTPException(429, _LLM_BUSY_MSG)
     try:
         provider = get_provider()
         answer = provider.answer_question(req.question, context)
     except Exception as e:
         raise HTTPException(500, f"LLM error: {e}")
+    finally:
+        _llm_semaphore.release()
     return {"answer": answer}
 
 
@@ -205,15 +228,21 @@ def _sse_event(payload: dict) -> str:
 
 
 def _query_stream_gen(df: pd.DataFrame, question: str):
-    context = generate_context(df)
-    try:
-        provider = get_provider()
-        for chunk in provider.answer_question_stream(question, context):
-            yield _sse_event({"delta": chunk})
-    except Exception as e:
-        yield _sse_event({"error": f"LLM error: {e}"})
+    if not _llm_semaphore.acquire(blocking=False):
+        yield _sse_event({"error": _LLM_BUSY_MSG})
         return
-    yield _sse_event({"done": True})
+    try:
+        context = generate_context(df)
+        try:
+            provider = get_provider()
+            for chunk in provider.answer_question_stream(question, context):
+                yield _sse_event({"delta": chunk})
+        except Exception as e:
+            yield _sse_event({"error": f"LLM error: {e}"})
+            return
+        yield _sse_event({"done": True})
+    finally:
+        _llm_semaphore.release()
 
 
 @app.post("/query/stream")
@@ -346,7 +375,7 @@ def clean_apply(session_id: str, req: CleanReq):
     df = _original(session_id)
     from app.data.cleaner import apply_cleaning
     ops_dicts = [op.model_dump(exclude_none=True) for op in req.operations]
-    cleaned = apply_cleaning(df, ops_dicts)
+    cleaned, warnings = apply_cleaning(df, ops_dicts)
     if len(cleaned) == 0:
         raise HTTPException(400, "Cleaning would remove all rows. Relax your settings and try again.")
     _cleaned_sessions[session_id] = cleaned
@@ -357,6 +386,7 @@ def clean_apply(session_id: str, req: CleanReq):
         "rows_removed": len(df) - len(cleaned),
         "columns_before": len(df.columns),
         "columns_after": len(cleaned.columns),
+        "warnings": warnings,
     }
 
 

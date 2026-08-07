@@ -53,9 +53,10 @@ def create_chart(
         ax.set_title(f"Line Plot — {column}")
 
     elif chart_type == "Bar Chart":
-        plot_df = df[[column]].head(50)
-        sns.barplot(data=plot_df, x=plot_df.index, y=column, ax=ax)
-        ax.set_title(f"Bar Chart — {column}")
+        counts = df[column].value_counts().head(20)
+        sns.barplot(x=counts.index.astype(str), y=counts.values, ax=ax)
+        ax.set_title(f"Bar Chart — frequency of {column}")
+        ax.set_ylabel("Count")
         ax.tick_params(axis="x", rotation=45)
 
     elif chart_type == "Scatter Plot":

@@ -17,12 +17,14 @@ class OllamaProvider(LLMProvider):
         temperature: float = 0.3,
         max_tokens: int = 2048,
         timeout: float = 90.0,
+        num_ctx: int = 8192,
     ):
         self.model = model
         self.host = host
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self.num_ctx = num_ctx
         self._client = None
 
     def _get_client(self):
@@ -42,7 +44,7 @@ class OllamaProvider(LLMProvider):
         response = self._get_client().chat(
             model=self.model,
             messages=messages,
-            options={"temperature": self.temperature, "num_predict": self.max_tokens},
+            options={"temperature": self.temperature, "num_predict": self.max_tokens, "num_ctx": self.num_ctx},
         )
         return response.message.content
 
@@ -54,7 +56,7 @@ class OllamaProvider(LLMProvider):
         stream = self._get_client().chat(
             model=self.model,
             messages=messages,
-            options={"temperature": self.temperature, "num_predict": self.max_tokens},
+            options={"temperature": self.temperature, "num_predict": self.max_tokens, "num_ctx": self.num_ctx},
             stream=True,
         )
         for chunk in stream:

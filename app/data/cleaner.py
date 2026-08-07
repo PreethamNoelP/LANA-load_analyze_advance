@@ -111,9 +111,33 @@ def detect_issues(df: pd.DataFrame) -> dict:
     return issues
 
 
-def apply_cleaning(df: pd.DataFrame, operations: list[dict]) -> pd.DataFrame:
-    """Apply a list of cleaning operations and return the resulting DataFrame."""
+def _to_numeric_lenient(series: pd.Series) -> pd.Series:
+    """Coerce to numeric, first stripping currency/percent formatting.
+
+    Handles common real-world number formats pandas' own numeric coercion
+    can't: "$1,234.56" -> 1234.56, "45%" -> 45, "(1,234)" (accounting-style
+    negatives) -> -1234.
+    """
+    if not (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+        return pd.to_numeric(series, errors="coerce")
+    cleaned = (
+        series.astype(str)
+        .str.strip()
+        .str.replace(r"[,$%]", "", regex=True)
+        .str.replace(r"^\((.+)\)$", r"-\1", regex=True)
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def apply_cleaning(df: pd.DataFrame, operations: list[dict]) -> tuple[pd.DataFrame, list[str]]:
+    """Apply a list of cleaning operations.
+
+    Returns the resulting DataFrame plus a list of human-readable warnings
+    for any operation that was skipped (type mismatch) or partially failed
+    (values that couldn't be converted) — these previously failed silently.
+    """
     result = df.copy()
+    warnings: list[str] = []
 
     for op in operations:
         op_type = op.get("type")
@@ -124,9 +148,12 @@ def apply_cleaning(df: pd.DataFrame, operations: list[dict]) -> pd.DataFrame:
             result = result.drop_duplicates().reset_index(drop=True)
 
         elif op_type == "fill_nulls" and col and col in result.columns:
-            if method == "mean" and pd.api.types.is_numeric_dtype(result[col]):
+            is_numeric = pd.api.types.is_numeric_dtype(result[col])
+            if method in ("mean", "median") and not is_numeric:
+                warnings.append(f"Fill nulls ({method}) skipped on '{col}' — column is not numeric.")
+            elif method == "mean":
                 result[col] = result[col].fillna(result[col].mean())
-            elif method == "median" and pd.api.types.is_numeric_dtype(result[col]):
+            elif method == "median":
                 result[col] = result[col].fillna(result[col].median())
             elif method == "zero":
                 result[col] = result[col].fillna(0)
@@ -138,7 +165,9 @@ def apply_cleaning(df: pd.DataFrame, operations: list[dict]) -> pd.DataFrame:
                 result = result.dropna(subset=[col]).reset_index(drop=True)
 
         elif op_type == "remove_outliers" and col and col in result.columns:
-            if pd.api.types.is_numeric_dtype(result[col]):
+            if not pd.api.types.is_numeric_dtype(result[col]):
+                warnings.append(f"Remove outliers skipped on '{col}' — column is not numeric.")
+            else:
                 q1 = result[col].quantile(0.25)
                 q3 = result[col].quantile(0.75)
                 iqr = q3 - q1
@@ -150,15 +179,16 @@ def apply_cleaning(df: pd.DataFrame, operations: list[dict]) -> pd.DataFrame:
                     ].reset_index(drop=True)
 
         elif op_type == "normalize" and col and col in result.columns:
-            if pd.api.types.is_numeric_dtype(result[col]):
-                if method == "minmax":
-                    mn, mx = result[col].min(), result[col].max()
-                    if mx != mn:
-                        result[col] = (result[col] - mn) / (mx - mn)
-                elif method == "zscore":
-                    mean, std = result[col].mean(), result[col].std()
-                    if std != 0:
-                        result[col] = (result[col] - mean) / std
+            if not pd.api.types.is_numeric_dtype(result[col]):
+                warnings.append(f"Normalize skipped on '{col}' — column is not numeric.")
+            elif method == "minmax":
+                mn, mx = result[col].min(), result[col].max()
+                if mx != mn:
+                    result[col] = (result[col] - mn) / (mx - mn)
+            elif method == "zscore":
+                mean, std = result[col].mean(), result[col].std()
+                if std != 0:
+                    result[col] = (result[col] - mean) / std
 
         elif op_type == "fix_text" and col and col in result.columns:
             mapping = op.get("mapping", {})
@@ -168,7 +198,15 @@ def apply_cleaning(df: pd.DataFrame, operations: list[dict]) -> pd.DataFrame:
         elif op_type == "cast_type" and col and col in result.columns:
             dtype = op.get("dtype")
             if dtype == "numeric":
-                result[col] = pd.to_numeric(result[col], errors="coerce")
+                before_non_null = int(result[col].notna().sum())
+                result[col] = _to_numeric_lenient(result[col])
+                after_non_null = int(result[col].notna().sum())
+                lost = before_non_null - after_non_null
+                if lost > 0:
+                    warnings.append(
+                        f"Cast '{col}' to number: {lost} value(s) couldn't be "
+                        f"parsed as numbers and were set to null."
+                    )
             elif dtype == "datetime":
                 result[col] = pd.to_datetime(result[col], errors="coerce")
             elif dtype == "category":
@@ -183,4 +221,4 @@ def apply_cleaning(df: pd.DataFrame, operations: list[dict]) -> pd.DataFrame:
                 notna = result[col].notna()
                 result[col] = result[col].astype(str).where(notna, None)
 
-    return result
+    return result, warnings

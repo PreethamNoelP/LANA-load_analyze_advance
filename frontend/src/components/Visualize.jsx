@@ -6,15 +6,29 @@ const CHART_TYPES = [
   'Box Plot', 'Heatmap', 'Violin Plot', 'Pie Chart', 'Area Plot',
 ]
 
+// Bar/Pie charts plot frequency and read any column type (text or number);
+// every other chart type plots the raw values, which only makes sense for numbers.
+const ANY_COLUMN_CHARTS = ['Bar Chart', 'Pie Chart']
+
 export default function Visualize({ session }) {
-  const [col, setCol] = useState(session.numeric_columns?.[0] || '')
-  const [xCol, setXCol] = useState(session.numeric_columns?.[0] || '')
+  const numericColumns = session.numeric_columns || []
+  const allColumns = session.columns || []
+
+  const [col, setCol] = useState(numericColumns[0] || '')
+  const [xCol, setXCol] = useState(numericColumns[0] || '')
   const [chartType, setChartType] = useState('Histogram')
   const [imgUrl, setImgUrl] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
   const needsX = chartType === 'Scatter Plot'
+  const columnOptions = ANY_COLUMN_CHARTS.includes(chartType) ? allColumns : numericColumns
+
+  function handleChartTypeChange(newType) {
+    setChartType(newType)
+    const opts = ANY_COLUMN_CHARTS.includes(newType) ? allColumns : numericColumns
+    if (!opts.includes(col)) setCol(opts[0] || '')
+  }
 
   async function generate() {
     setError(null)
@@ -39,7 +53,7 @@ export default function Visualize({ session }) {
       <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div style={fieldWrap}>
           <label style={labelStyle}>Chart type</label>
-          <select value={chartType} onChange={e => setChartType(e.target.value)} style={selectStyle}>
+          <select value={chartType} onChange={e => handleChartTypeChange(e.target.value)} style={selectStyle}>
             {CHART_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         </div>
@@ -47,7 +61,7 @@ export default function Visualize({ session }) {
         <div style={fieldWrap}>
           <label style={labelStyle}>{needsX ? 'Y column' : 'Column'}</label>
           <select value={col} onChange={e => setCol(e.target.value)} style={selectStyle}>
-            {session.numeric_columns.map(c => <option key={c} value={c}>{c}</option>)}
+            {columnOptions.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
 
@@ -55,7 +69,7 @@ export default function Visualize({ session }) {
           <div style={fieldWrap}>
             <label style={labelStyle}>X column</label>
             <select value={xCol} onChange={e => setXCol(e.target.value)} style={selectStyle}>
-              {session.numeric_columns.map(c => <option key={c} value={c}>{c}</option>)}
+              {numericColumns.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
         )}
