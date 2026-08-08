@@ -18,16 +18,12 @@ export async function getSessionInfo(sessionId) {
   return ok(await fetch(`${BASE}/session/${sessionId}`))
 }
 
-export async function queryAI(sessionId, question) {
-  return ok(await fetch(`${BASE}/query`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, question }),
-  }))
-}
-
-// Yields answer text incrementally as the model generates it, parsing the
-// backend's `data: {...}\n\n` SSE frames from /query/stream.
+// Yields events as the model generates its answer, parsing the backend's
+// `data: {...}\n\n` SSE frames from /query/stream:
+//   { type: 'delta', text }            — the next chunk of answer text
+//   { type: 'validation', validation } — the trust verdict, sent once the
+//                                        full answer has been checked against
+//                                        the facts that produced the context
 export async function* streamQuery(sessionId, question) {
   const res = await fetch(`${BASE}/query/stream`, {
     method: 'POST',
@@ -57,7 +53,8 @@ export async function* streamQuery(sessionId, question) {
       const payload = JSON.parse(rawEvent.slice('data: '.length))
       if (payload.error) throw new Error(payload.error)
       if (payload.done) return
-      if (payload.delta) yield payload.delta
+      if (payload.delta) yield { type: 'delta', text: payload.delta }
+      if (payload.validation) yield { type: 'validation', validation: payload.validation }
     }
   }
 }
@@ -118,8 +115,4 @@ export async function switchVersion(sessionId, version) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ version }),
   }))
-}
-
-export async function getCleanStatus(sessionId) {
-  return ok(await fetch(`${BASE}/clean/status/${sessionId}`))
 }

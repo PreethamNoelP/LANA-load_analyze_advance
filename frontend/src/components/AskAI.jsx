@@ -42,13 +42,40 @@ function Message({ msg }) {
           color: 'var(--text)', whiteSpace: 'pre-wrap',
         }}>
           {msg.a}
+
+          {/* Trust verdict — the answer's figures were checked against the
+              statistics LANA actually computed. Only failures are shown. */}
+          {msg.validation?.warnings?.length > 0 && (
+            <div style={{
+              marginTop: 14, padding: '11px 14px',
+              background: 'rgba(240,180,60,0.08)',
+              border: '1px solid rgba(240,180,60,0.28)',
+              borderRadius: 8, fontSize: 12.5, lineHeight: 1.6,
+              color: 'var(--amber)', whiteSpace: 'normal',
+            }}>
+              <div style={{ fontWeight: 700, marginBottom: 5 }}>⚠ Unverified figures</div>
+              {msg.validation.warnings.map((w, i) => (
+                <div key={i} style={{ marginTop: i > 0 ? 5 : 0 }}>{w}</div>
+              ))}
+              <div style={{ marginTop: 7, fontSize: 11, opacity: 0.75, fontFamily: 'var(--ff-mono)' }}>
+                {msg.validation.verified} of {msg.validation.numbers_checked} numbers matched a computed statistic
+              </div>
+            </div>
+          )}
+
           <div style={{
             marginTop: 10, fontSize: 11,
             color: 'var(--muted)', fontFamily: 'var(--ff-mono)',
             display: 'flex', alignItems: 'center', gap: 6,
           }}>
-            <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
+            <span style={{
+              width: 5, height: 5, borderRadius: '50%', display: 'inline-block',
+              background: msg.validation?.warnings?.length ? 'var(--amber)' : 'var(--green)',
+            }} />
             LANA AI
+            {msg.validation && !msg.validation.warnings.length && msg.validation.verified > 0 && (
+              <span style={{ opacity: 0.7 }}>· {msg.validation.verified} figure(s) verified against the data</span>
+            )}
           </div>
         </div>
       )}

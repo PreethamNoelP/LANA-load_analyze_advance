@@ -98,18 +98,24 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 │                     FastAPI  (Uvicorn ASGI)                            │
 │                                                                       │
 │  POST /upload          →  pandas.read_csv/excel/json                  │
-│                        →  _sessions[uuid] = DataFrame                 │
+│                        →  SessionStore[uuid] = Session(raw, cleaned)  │
+│                        →  profile_dataframe() + quality score         │
 │                                                                       │
-│  GET  /clean/preview   →  detect_issues(df)  → JSON                  │
-│  POST /clean/apply     →  apply_cleaning(df, ops) → cleaned df        │
+│  GET  /profile         →  per-column kind, shape, caveats             │
+│  GET  /lineage         →  transformation log: raw → active version    │
+│                                                                       │
+│  GET  /clean/preview   →  detect_issues(df)  → JSON + reasoning       │
+│  POST /clean/apply     →  apply_cleaning(df, ops) → (df, ledger)      │
 │  POST /clean/version   →  switch active view (original/cleaned)       │
 │                                                                       │
-│  POST /query           →  generate_context(df)                        │
+│  POST /query           →  build_context(df) → facts + prompt          │
 │                        →  LLMProvider.answer_question()               │
+│                        →  validate_answer(answer, facts)              │
 │                                                                       │
 │  POST /chart           →  create_chart(df, type, col) → PNG bytes    │
-│  GET  /stats           →  compute_statistics(series)  → JSON         │
-│  POST /regression      →  perform_linear_regression() → JSON         │
+│  GET  /stats           →  compute_statistics(series)  → JSON + CI95   │
+│  GET  /correlation     →  compute_correlations() + BH q-values        │
+│  POST /regression      →  perform_linear_regression() → JSON + CI     │
 │  GET  /export/*        →  generate_pdf / generate_word / df.to_csv() │
 └──────────┬───────────────────────────┬───────────────────────────────┘
            │                           │

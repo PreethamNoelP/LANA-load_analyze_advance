@@ -79,37 +79,63 @@ function DuplicatesSection({ info, enabled, onToggle }) {
 
 /* ── Section: Missing Values ─────────────────────────────────────────────── */
 
+function Reasoning({ text, caveats }) {
+  if (!text && !(caveats?.length > 0)) return null
+  return (
+    <div style={s.reasonBox}>
+      {text && <div>{text}</div>}
+      {caveats?.map((c, i) => (
+        <div key={i} style={{ display: 'flex', gap: 7, marginTop: 6, color: 'var(--amber)' }}>
+          <span style={{ flexShrink: 0 }}>⚠</span><span>{c}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function NullsSection({ info, ops, onOpsChange }) {
   const total = Object.values(info).reduce((sum, col) => sum + col.count, 0)
 
   return (
     <SectionCard icon="◻" title="Missing Values" badge={`${total} nulls across ${Object.keys(info).length} columns`}>
+      <p style={s.hint}>
+        Every fill is a guess. LANA recommends the option its profile supports and explains the
+        cost — imputed columns also gain a <code style={s.codeChip}>__was_missing</code> flag so
+        the guess stays visible downstream.
+      </p>
       <div style={s.colList}>
-        {Object.entries(info).map(([col, meta]) => (
-          <div key={col} style={s.colRow}>
-            <div style={s.colName}>
-              <span style={s.colLabel}>{col}</span>
-              <span style={s.colSub}>{meta.count} nulls · {meta.pct}% · {meta.dtype}</span>
-            </div>
-            <div style={s.methodGroup}>
-              {meta.dtype === 'object' || !meta.mean ? (
-                <>
-                  <Pill label="Mode" active={ops[col] === 'mode'} onClick={() => onOpsChange(col, 'mode')} />
+        {Object.entries(info).map(([col, meta]) => {
+          const numeric = meta.mean != null
+          return (
+            <div key={col} style={s.colBlock}>
+              <div style={s.colRow}>
+                <div style={s.colName}>
+                  <span style={s.colLabel}>{col}</span>
+                  <span style={s.colSub}>{meta.count} nulls · {meta.pct}% · {meta.dtype}</span>
+                </div>
+                <div style={s.methodGroup}>
+                  <Pill
+                    label={meta.suggested === 'flag' ? 'Flag only ✓' : 'Flag only'}
+                    active={ops[col] === 'flag'}
+                    onClick={() => onOpsChange(col, 'flag')}
+                  />
+                  {numeric ? (
+                    <>
+                      <Pill label={`Median (${meta.median})${meta.suggested === 'median' ? ' ✓' : ''}`} active={ops[col] === 'median'} onClick={() => onOpsChange(col, 'median')} />
+                      <Pill label={`Mean (${meta.mean})`} active={ops[col] === 'mean'} onClick={() => onOpsChange(col, 'mean')} />
+                      <Pill label="Zero" active={ops[col] === 'zero'} onClick={() => onOpsChange(col, 'zero')} />
+                    </>
+                  ) : (
+                    <Pill label={`Mode${meta.suggested === 'mode' ? ' ✓' : ''}`} active={ops[col] === 'mode'} onClick={() => onOpsChange(col, 'mode')} />
+                  )}
                   <Pill label="Drop rows" active={ops[col] === 'drop'} onClick={() => onOpsChange(col, 'drop')} />
                   <Pill label="Skip" active={!ops[col] || ops[col] === 'skip'} onClick={() => onOpsChange(col, 'skip')} />
-                </>
-              ) : (
-                <>
-                  <Pill label={`Mean (${meta.mean})`} active={ops[col] === 'mean'} onClick={() => onOpsChange(col, 'mean')} />
-                  <Pill label={`Median (${meta.median})`} active={ops[col] === 'median'} onClick={() => onOpsChange(col, 'median')} />
-                  <Pill label="Zero" active={ops[col] === 'zero'} onClick={() => onOpsChange(col, 'zero')} />
-                  <Pill label="Drop rows" active={ops[col] === 'drop'} onClick={() => onOpsChange(col, 'drop')} />
-                  <Pill label="Skip" active={!ops[col] || ops[col] === 'skip'} onClick={() => onOpsChange(col, 'skip')} />
-                </>
-              )}
+                </div>
+              </div>
+              <Reasoning text={meta.rationale} />
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </SectionCard>
   )
@@ -121,28 +147,52 @@ function OutliersSection({ info, ops, onOpsChange }) {
   const total = Object.values(info).reduce((sum, col) => sum + col.count, 0)
 
   return (
-    <SectionCard icon="⬥" title="Outliers" badge={`${total} across ${Object.keys(info).length} columns`}>
-      <p style={s.hint}>Detected using the IQR method (Q1 − 1.5×IQR, Q3 + 1.5×IQR).</p>
+    <SectionCard icon="⬥" title="Unusual Values" badge={`${total} across ${Object.keys(info).length} columns`}>
+      <p style={s.hint}>
+        These are candidates for review, not errors. Two independent rules are run — Tukey IQR
+        fences and the robust MAD rule — and where they disagree, that disagreement is shown.
+        Flagging keeps every row; removal is available but discards the whole record.
+      </p>
       <div style={s.colList}>
-        {Object.entries(info).map(([col, meta]) => (
-          <div key={col} style={s.colRow}>
-            <div style={s.colName}>
-              <span style={s.colLabel}>{col}</span>
-              <span style={s.colSub}>
-                {meta.count} outliers · valid range [{meta.lower_bound}, {meta.upper_bound}]
-              </span>
+        {Object.entries(info).map(([col, meta]) => {
+          const mode = ops[col] || 'skip'
+          const iqr = meta.methods?.iqr
+          const mad = meta.methods?.modified_zscore
+          return (
+            <div key={col} style={s.colBlock}>
+              <div style={s.colRow}>
+                <div style={s.colName}>
+                  <span style={s.colLabel}>{col}</span>
+                  <span style={s.colSub}>
+                    IQR flags {iqr?.applicable ? iqr.count : '—'} · MAD flags {mad?.applicable ? mad.count : '—'}
+                    {meta.agreement ? ` · both agree on ${meta.agreement.both}` : ''}
+                  </span>
+                </div>
+                <div style={s.methodGroup}>
+                  <Pill label="Flag ✓" active={mode === 'flag'} onClick={() => onOpsChange(col, 'flag')} />
+                  <Pill label="Cap to fence" active={mode === 'winsorize'} onClick={() => onOpsChange(col, 'winsorize')} />
+                  <Pill label="Delete rows" active={mode === 'remove'} onClick={() => onOpsChange(col, 'remove')} />
+                  <Pill label="Skip" active={mode === 'skip'} onClick={() => onOpsChange(col, 'skip')} />
+                </div>
+              </div>
+              {meta.sample_values?.length > 0 && (
+                <div style={s.sampleRow}>
+                  <span style={{ color: 'var(--muted)' }}>most extreme:</span>
+                  {meta.sample_values.map((v, i) => (
+                    <code key={i} style={s.variantChip}>{v}</code>
+                  ))}
+                </div>
+              )}
+              <Reasoning text={meta.interpretation} caveats={meta.caveats} />
+              {mode === 'remove' && (
+                <div style={s.dangerBox}>
+                  This deletes {iqr?.count ?? meta.count} complete row(s) and everything else they
+                  contain. Prefer Flag or Cap unless you know these values are invalid.
+                </div>
+              )}
             </div>
-            <label style={s.checkRow}>
-              <input
-                type="checkbox"
-                checked={!!ops[col]}
-                onChange={e => onOpsChange(col, e.target.checked)}
-                style={{ accentColor: 'var(--accent)', width: 15, height: 15, cursor: 'pointer' }}
-              />
-              <span style={{ fontSize: 13 }}>Remove {meta.count} outlier{meta.count !== 1 ? 's' : ''}</span>
-            </label>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </SectionCard>
   )
@@ -242,6 +292,104 @@ function SchemaSection({ columnTypes, ops, onOpsChange }) {
   )
 }
 
+/* ── Quality Score ───────────────────────────────────────────────────────── */
+
+const GRADE_COLORS = {
+  excellent: 'var(--green)', good: 'var(--green)',
+  fair: 'var(--amber)', poor: 'var(--red)',
+}
+
+function QualityBanner({ quality }) {
+  const color = GRADE_COLORS[quality.grade] || 'var(--muted)'
+  return (
+    <div style={s.qualityCard}>
+      <div style={{ ...s.qualityScore, color, borderColor: color }}>
+        {Math.round(quality.score)}
+      </div>
+      <div style={{ flex: 1, minWidth: 200 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>
+          Data quality: <span style={{ color }}>{quality.grade}</span>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3, fontFamily: 'var(--ff-mono)' }}>
+          {quality.total_rows?.toLocaleString()} rows × {quality.total_columns} columns ·{' '}
+          {quality.missing_pct}% of cells empty
+        </div>
+        {quality.issues?.length > 0 && (
+          <ul style={s.qualityList}>
+            {quality.issues.map((issue, i) => (
+              <li key={i}>{issue.detail} <span style={{ opacity: 0.55 }}>(−{issue.penalty})</span></li>
+            ))}
+          </ul>
+        )}
+        {quality.skewed_columns?.length > 0 && (
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
+            Highly skewed (not a defect, but read the median rather than the mean):{' '}
+            <strong style={{ color: 'var(--accent2)' }}>{quality.skewed_columns.join(', ')}</strong>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ── Lineage ─────────────────────────────────────────────────────────────── */
+
+function LineagePanel({ lineage }) {
+  const [open, setOpen] = useState(false)
+  if (!lineage?.steps?.length) return null
+  const { summary, steps } = lineage
+
+  return (
+    <SectionCard icon="⌥" title="Transformation Log" badge={`${summary.steps} step${summary.steps !== 1 ? 's' : ''}`}>
+      <div style={s.lineageSummary}>
+        <span><strong style={{ color: 'var(--text)' }}>{summary.rows_original.toLocaleString()}</strong> raw rows</span>
+        <span style={{ opacity: 0.5 }}>→</span>
+        <span><strong style={{ color: 'var(--text)' }}>{summary.rows_final.toLocaleString()}</strong> after cleaning</span>
+        <span style={{
+          marginLeft: 'auto',
+          color: summary.rows_removed > 0 ? 'var(--amber)' : 'var(--green)',
+        }}>
+          {summary.rows_removed > 0
+            ? `${summary.rows_removed.toLocaleString()} rows lost (${summary.rows_removed_pct}%)`
+            : 'no rows lost'}
+        </span>
+      </div>
+
+      <button style={s.disclosure} onClick={() => setOpen(o => !o)}>
+        {open ? '▾' : '▸'} {open ? 'Hide' : 'Show'} step-by-step detail
+      </button>
+
+      {open && steps.map(step => (
+        <div key={step.step} style={s.stepRow}>
+          <div style={s.stepHead}>
+            <span style={s.stepIndex}>{step.step}</span>
+            <code style={{ fontSize: 12, color: 'var(--accent2)' }}>{step.operation}</code>
+            {step.column && <code style={{ fontSize: 12, color: 'var(--muted)' }}>{step.column}</code>}
+            <span style={{
+              marginLeft: 'auto', fontSize: 10.5, padding: '2px 8px', borderRadius: 20,
+              background: step.destructive ? 'rgba(224,82,82,0.14)' : 'rgba(78,199,127,0.14)',
+              color: step.destructive ? 'var(--red)' : 'var(--green)',
+            }}>
+              {step.destructive ? 'destructive' : 'reversible'}
+            </span>
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.55 }}>{step.rationale}</div>
+          <div style={s.stepMeta}>
+            {step.rows_removed > 0 && <span>−{step.rows_removed.toLocaleString()} rows</span>}
+            {step.cells_changed > 0 && <span>{step.cells_changed.toLocaleString()} values changed</span>}
+            {step.columns_added?.length > 0 && <span>+{step.columns_added.join(', ')}</span>}
+          </div>
+          {step.caveats?.map((c, i) => (
+            <div key={i} style={{ display: 'flex', gap: 7, marginTop: 6, fontSize: 12, color: 'var(--amber)' }}>
+              <span style={{ flexShrink: 0 }}>⚠</span><span>{c}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </SectionCard>
+  )
+}
+
 /* ── Result Banner ───────────────────────────────────────────────────────── */
 
 function ResultBanner({ result, version, onVersionSwitch }) {
@@ -273,12 +421,19 @@ function ResultBanner({ result, version, onVersionSwitch }) {
           >Cleaned</button>
         </div>
       </div>
-      {result.warnings?.length > 0 && (
+      {/* Requested but not applied — a silent no-op is how a user ends up
+          believing a column was cleaned when it was not. Per-step caveats
+          live in the transformation log rather than being repeated here. */}
+      {result.lineage?.summary?.skipped?.length > 0 && (
         <div style={s.warningsBox}>
-          {result.warnings.map((w, i) => (
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Not applied:</div>
+          {result.lineage.summary.skipped.map((skip, i) => (
             <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: i > 0 ? 6 : 0 }}>
               <span style={{ color: 'var(--amber)', flexShrink: 0 }}>⚠</span>
-              <span>{w}</span>
+              <span>
+                <code>{skip.operation}</code>
+                {skip.column ? <> on <code>{skip.column}</code></> : null} — {skip.reason}
+              </span>
             </div>
           ))}
         </div>
@@ -330,8 +485,10 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
         setNullOps(defaults)
       }
       if (data.outliers) {
+        // Nothing is pre-selected — the user opts in. 'flag' is marked as
+        // recommended in the UI, but LANA never transforms data unasked.
         const defaults = {}
-        Object.keys(data.outliers).forEach(col => { defaults[col] = false })
+        Object.keys(data.outliers).forEach(col => { defaults[col] = 'skip' })
         setOutlierOps(defaults)
       }
       if (data.text_inconsistencies) {
@@ -374,8 +531,10 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
     }
 
     if (issues?.outliers) {
-      Object.entries(outlierOps).forEach(([col, enabled]) => {
-        if (enabled) ops.push({ type: 'remove_outliers', column: col })
+      Object.entries(outlierOps).forEach(([col, mode]) => {
+        if (mode === 'flag')           ops.push({ type: 'flag_outliers', column: col })
+        else if (mode === 'winsorize') ops.push({ type: 'winsorize', column: col })
+        else if (mode === 'remove')    ops.push({ type: 'remove_outliers', column: col })
       })
     }
 
@@ -468,6 +627,12 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
           <style>{`@keyframes lana-pulse{0%,100%{opacity:0.3}50%{opacity:1}}`}</style>
         </div>
       )}
+
+      {/* Transformation log — the audit trail from raw upload to this version */}
+      {result?.lineage && <LineagePanel lineage={result.lineage} />}
+
+      {/* Quality assessment — what the data looks like before any action */}
+      {!loading && issues?.quality && <QualityBanner quality={issues.quality} />}
 
       {/* Column types — independent of issue detection, always available */}
       {!loading && issues?.column_types && (
@@ -617,7 +782,83 @@ const s = {
   colSub: { display: 'block', fontSize: 11, color: 'var(--muted)', marginTop: 2 },
   colSub2: { fontSize: 11, color: 'var(--muted)', marginLeft: 8 },
 
+  colBlock: {
+    padding: '12px 14px',
+    background: 'rgba(255,255,255,0.02)',
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+  },
+
   methodGroup: { display: 'flex', gap: 6, flexWrap: 'wrap' },
+
+  reasonBox: {
+    marginTop: 10, paddingTop: 10,
+    borderTop: '1px solid var(--border)',
+    fontSize: 12, color: 'var(--muted)', lineHeight: 1.55,
+  },
+  dangerBox: {
+    marginTop: 10, padding: '9px 12px',
+    background: 'rgba(224,82,82,0.08)',
+    border: '1px solid rgba(224,82,82,0.25)',
+    borderRadius: 7, fontSize: 12, color: 'var(--red)', lineHeight: 1.5,
+  },
+  sampleRow: {
+    display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center',
+    marginTop: 10, fontSize: 11,
+  },
+  codeChip: {
+    fontFamily: 'var(--ff-mono)', fontSize: 11,
+    background: 'rgba(255,255,255,0.05)', padding: '1px 5px', borderRadius: 4,
+  },
+
+  qualityCard: {
+    display: 'flex', alignItems: 'flex-start', gap: 18,
+    padding: '16px 20px',
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 12,
+    marginBottom: 16, flexWrap: 'wrap',
+  },
+  qualityScore: {
+    width: 58, height: 58, borderRadius: 12,
+    border: '2px solid', display: 'flex', alignItems: 'center',
+    justifyContent: 'center', fontSize: 20, fontWeight: 700,
+    fontFamily: 'var(--ff-mono)', flexShrink: 0,
+  },
+  qualityList: {
+    margin: '8px 0 0', paddingLeft: 16,
+    fontSize: 12, color: 'var(--muted)', lineHeight: 1.6,
+  },
+
+  lineageSummary: {
+    display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+    fontSize: 12.5, color: 'var(--muted)', fontFamily: 'var(--ff-mono)',
+    paddingBottom: 12, borderBottom: '1px solid var(--border)',
+  },
+  disclosure: {
+    background: 'transparent', border: 'none', padding: '10px 0 4px',
+    color: 'var(--accent2)', fontSize: 12, cursor: 'pointer',
+    fontFamily: 'var(--ff-ui)',
+  },
+  stepRow: {
+    padding: '12px 14px', marginTop: 8,
+    background: 'rgba(255,255,255,0.02)',
+    border: '1px solid var(--border)', borderRadius: 8,
+  },
+  stepHead: {
+    display: 'flex', alignItems: 'center', gap: 9,
+    marginBottom: 7, flexWrap: 'wrap',
+  },
+  stepIndex: {
+    width: 19, height: 19, borderRadius: 5, flexShrink: 0,
+    background: 'rgba(91,108,255,0.15)', color: 'var(--accent2)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    fontSize: 10.5, fontWeight: 700,
+  },
+  stepMeta: {
+    display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 7,
+    fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--ff-mono)',
+  },
   pill: {
     fontSize: 11, padding: '4px 11px', borderRadius: 20,
     cursor: 'pointer', fontFamily: 'var(--ff-ui)',

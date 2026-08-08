@@ -83,12 +83,18 @@ export default function App() {
     setAiMessages(prev => [...prev, { id, q: question, loading: true }])
     try {
       let answer = ''
-      for await (const delta of streamQuery(session.session_id, question)) {
-        answer += delta
-        setAiMessages(prev => prev.map(m => m.id === id ? { ...m, loading: false, a: answer } : m))
+      let validation = null
+      for await (const evt of streamQuery(session.session_id, question)) {
+        if (evt.type === 'delta') answer += evt.text
+        // Arrives once, after the full answer has been checked against the
+        // facts LANA computed — a flag on figures the data does not support.
+        else if (evt.type === 'validation') validation = evt.validation
+        setAiMessages(prev => prev.map(m =>
+          m.id === id ? { ...m, loading: false, a: answer, validation } : m))
       }
       // Covers an empty-but-successful stream (no deltas emitted) — still clear "loading".
-      setAiMessages(prev => prev.map(m => m.id === id ? { ...m, loading: false, a: answer } : m))
+      setAiMessages(prev => prev.map(m =>
+        m.id === id ? { ...m, loading: false, a: answer, validation } : m))
     } catch (e) {
       setAiMessages(prev => prev.map(m => m.id === id ? { ...m, loading: false, error: e.message } : m))
     } finally {
