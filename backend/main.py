@@ -5,7 +5,6 @@ import os
 import uuid
 import math
 import threading
-from collections import OrderedDict
 from pathlib import Path
 from typing import Literal
 import numpy as np
@@ -20,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.config import config
 from app.llm import get_provider
+from app.llm.context import build_context
+from app.llm.validation import validate_answer
 from app.llm.ollama_provider import OllamaProvider
 from app.analysis.statistics import (
     compute_statistics,
@@ -28,7 +29,10 @@ from app.analysis.statistics import (
     generate_recommendations,
 )
 from app.analysis.regression import perform_linear_regression
-from app.visualization.charts import create_chart
+from app.data.cleaner import apply_cleaning, detect_issues
+from app.data.profile import dataset_quality, profile_dataframe
+from app.visualization.charts import CHART_TYPES, create_chart
+from backend.session_store import CLEANED, ORIGINAL, Session, SessionStore
 
 try:
     from app.export.exporters import generate_pdf_report, generate_word_report
@@ -36,7 +40,7 @@ try:
 except ImportError:
     EXPORT_OK = False
 
-app = FastAPI(title="LANA API", version="1.0.0")
+app = FastAPI(title="LANA API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,6 +52,11 @@ app.add_middleware(
 
 MAX_UPLOAD_MB = int(os.getenv("LANA_MAX_UPLOAD_MB", "200"))
 MAX_SESSIONS = int(os.getenv("LANA_MAX_SESSIONS", "30"))
+# Resident-bytes ceiling across all sessions. Session count alone is not a
+# memory bound — a handful of wide uploads can exhaust the host well before
+# the count limit is reached.
+MAX_SESSION_MB = int(os.getenv("LANA_MAX_SESSION_MB", "2048"))
+SESSION_TTL_SECONDS = float(os.getenv("LANA_SESSION_TTL_SECONDS", "3600"))
 
 # Caps how many LLM requests run at once — a local Ollama model serves one
 # request at a time well; without this, a burst of concurrent visitors all
@@ -56,39 +65,14 @@ MAX_CONCURRENT_LLM = int(os.getenv("LANA_MAX_CONCURRENT_LLM", "2"))
 _llm_semaphore = threading.Semaphore(MAX_CONCURRENT_LLM)
 _LLM_BUSY_MSG = "The AI is busy answering other questions right now — try again in a moment."
 
-_sessions: OrderedDict[str, pd.DataFrame] = OrderedDict()
-_cleaned_sessions: dict[str, pd.DataFrame] = {}
-_active_version: dict[str, str] = {}  # 'original' | 'cleaned'
+_store = SessionStore(
+    max_sessions=MAX_SESSIONS,
+    max_bytes=MAX_SESSION_MB * 1024 * 1024,
+    ttl_seconds=SESSION_TTL_SECONDS,
+)
 
 
-def _store_session(sid: str, df: pd.DataFrame) -> None:
-    """Store a new session; evict the least recently used beyond MAX_SESSIONS."""
-    _sessions[sid] = df
-    _sessions.move_to_end(sid)
-    while len(_sessions) > MAX_SESSIONS:
-        old, _ = _sessions.popitem(last=False)
-        _cleaned_sessions.pop(old, None)
-        _active_version.pop(old, None)
-
-
-def _original(sid: str) -> pd.DataFrame:
-    """Return the original uploaded DataFrame, marking the session recently used."""
-    df = _sessions.get(sid)
-    if df is None:
-        raise HTTPException(404, "Session not found — upload a dataset first.")
-    _sessions.move_to_end(sid)
-    return df
-
-
-def _session(sid: str) -> pd.DataFrame:
-    """Return the currently active DataFrame for a session (original or cleaned)."""
-    df = _original(sid)
-    if _active_version.get(sid) == 'cleaned':
-        cleaned = _cleaned_sessions.get(sid)
-        if cleaned is not None:
-            return cleaned
-    return df
-
+# ── Serialisation helpers ─────────────────────────────────────────────────────
 
 def _clean(val):
     if isinstance(val, np.generic):
@@ -101,8 +85,26 @@ def _clean(val):
     return val
 
 
+def _jsonable(obj):
+    """Recursively strip NaN/Inf and numpy scalars from a nested structure.
+
+    Responses now carry nested profiles, ledgers and diagnostics; a single
+    NaN anywhere inside would otherwise be serialised as the literal `NaN`,
+    which is not valid JSON and fails to parse in the browser.
+    """
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_jsonable(v) for v in obj]
+    return _clean(obj)
+
+
 def _clean_record(rec: dict) -> dict:
     return {k: _clean(v) for k, v in rec.items()}
+
+
+def _preview(df: pd.DataFrame, rows: int = 8) -> list[dict]:
+    return [_clean_record(r) for r in df.head(rows).to_dict(orient="records")]
 
 
 def _parse_dataframe(ext: str, buf: io.BytesIO) -> pd.DataFrame:
@@ -113,11 +115,30 @@ def _parse_dataframe(ext: str, buf: io.BytesIO) -> pd.DataFrame:
     return pd.read_json(buf)
 
 
+# ── Session accessors ─────────────────────────────────────────────────────────
+
+def _get_session(session_id: str) -> Session:
+    session = _store.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found — upload a dataset first.")
+    return session
+
+
+def _original(session_id: str) -> pd.DataFrame:
+    """The untouched uploaded frame. Never overwritten by cleaning."""
+    return _get_session(session_id).raw
+
+
+def _session(session_id: str) -> pd.DataFrame:
+    """The frame for the session's active version (original or cleaned)."""
+    return _get_session(session_id).active
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "sessions": _store.stats()}
 
 
 @app.post("/upload")
@@ -142,8 +163,7 @@ async def upload(file: UploadFile = File(...)):
                 f"(set LANA_MAX_UPLOAD_MB to change it).",
             )
         chunks.append(chunk)
-    content = b"".join(chunks)
-    buf = io.BytesIO(content)
+    buf = io.BytesIO(b"".join(chunks))
 
     try:
         # Parsing runs in a worker thread — pandas' readers are synchronous
@@ -153,33 +173,76 @@ async def upload(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
 
+    if df.empty:
+        raise HTTPException(400, "The file parsed successfully but contains no rows.")
+
     sid = str(uuid.uuid4())
-    _store_session(sid, df)
+    _store.create(sid, file.filename, df)
 
-    numeric_cols = df.select_dtypes("number").columns.tolist()
-    preview = [_clean_record(r) for r in df.head(8).to_dict(orient="records")]
+    # Profiling is the first thing a data scientist does; surfacing it at
+    # upload means the user sees what they are working with before they act.
+    profiles = await run_in_threadpool(profile_dataframe, df)
+    quality = dataset_quality(profiles, len(df))
 
-    return {
+    return _jsonable({
         "session_id": sid,
         "filename": file.filename,
         "rows": len(df),
         "columns": df.columns.tolist(),
-        "numeric_columns": numeric_cols,
-        "preview": preview,
-    }
+        "numeric_columns": df.select_dtypes("number").columns.tolist(),
+        "preview": _preview(df),
+        "quality": quality,
+        "profiles": {name: p.to_dict() for name, p in profiles.items()},
+    })
 
 
 @app.get("/session/{session_id}")
 def session_info(session_id: str):
     """Metadata + preview for the currently active version (original or cleaned)."""
-    df = _session(session_id)
-    return {
+    session = _get_session(session_id)
+    df = session.active
+    return _jsonable({
         "session_id": session_id,
+        "filename": session.filename,
         "rows": len(df),
         "columns": df.columns.tolist(),
         "numeric_columns": df.select_dtypes("number").columns.tolist(),
-        "preview": [_clean_record(r) for r in df.head(8).to_dict(orient="records")],
-    }
+        "preview": _preview(df),
+        "version": session.active_version,
+        "has_cleaned": session.has_cleaned,
+    })
+
+
+@app.get("/profile/{session_id}")
+def profile(session_id: str):
+    """Full column-by-column profile and quality assessment of the active version."""
+    session = _get_session(session_id)
+    df = session.active
+    profiles = profile_dataframe(df)
+    return _jsonable({
+        "version": session.active_version,
+        "rows": len(df),
+        "quality": dataset_quality(profiles, len(df)),
+        "profiles": {name: p.to_dict() for name, p in profiles.items()},
+    })
+
+
+@app.get("/lineage/{session_id}")
+def lineage(session_id: str):
+    """The transformation log linking the raw upload to the active version."""
+    session = _get_session(session_id)
+    if session.ledger is None:
+        return {
+            "version": session.active_version,
+            "summary": {"steps": 0, "rows_original": len(session.raw),
+                        "rows_final": len(session.raw), "rows_removed": 0},
+            "steps": [],
+            "narrative": "No transformations were applied — this is the raw uploaded data.",
+        }
+    return _jsonable({
+        "version": session.active_version,
+        **session.ledger.to_dict(len(session.raw)),
+    })
 
 
 class QueryReq(BaseModel):
@@ -190,11 +253,18 @@ class QueryReq(BaseModel):
 class CleanOperation(BaseModel):
     # Must match the operations implemented in app/data/cleaner.py — unknown
     # values are rejected with 422 instead of silently doing nothing.
-    type: Literal["remove_duplicates", "fill_nulls", "remove_outliers", "normalize", "fix_text", "cast_type"]
+    type: Literal[
+        "remove_duplicates", "fill_nulls", "flag_outliers", "winsorize",
+        "remove_outliers", "normalize", "fix_text", "cast_type",
+    ]
     column: str | None = None
-    method: Literal["mean", "median", "zero", "mode", "drop", "minmax", "zscore"] | None = None
+    # 'flag' fills nothing — it records which rows were missing and leaves the
+    # nulls in place, which is the non-destructive default for high missingness.
+    method: Literal["mean", "median", "zero", "mode", "drop", "flag", "minmax", "zscore"] | None = None
     mapping: dict | None = None
     dtype: Literal["numeric", "datetime", "category", "text"] | None = None
+    outlier_method: Literal["iqr", "modified_zscore"] | None = None
+    add_indicator: bool | None = None
 
 
 class CleanReq(BaseModel):
@@ -205,41 +275,69 @@ class VersionReq(BaseModel):
     version: str
 
 
+def _build_query_context(session: Session):
+    """Grounded context for the session's active version, including lineage."""
+    return build_context(
+        session.active,
+        lineage_narrative=session.lineage_narrative(),
+        version=session.active_version,
+    )
+
+
 @app.post("/query")
 def query(req: QueryReq):
-    df = _session(req.session_id)
-    context = generate_context(df)
+    session = _get_session(req.session_id)
+    context = _build_query_context(session)
     if not _llm_semaphore.acquire(blocking=False):
         raise HTTPException(429, _LLM_BUSY_MSG)
     try:
         provider = get_provider()
-        answer = provider.answer_question(req.question, context)
+        answer = provider.answer_question(req.question, context.text)
     except Exception as e:
         raise HTTPException(500, f"LLM error: {e}")
     finally:
         _llm_semaphore.release()
-    return {"answer": answer}
+
+    # Every answer is checked against the facts that produced it — a fluent
+    # local model will otherwise supply a confident number for a question the
+    # context cannot answer.
+    validation = validate_answer(answer, context)
+    return _jsonable({
+        "answer": answer,
+        "validation": validation.to_dict(),
+        "context_coverage": context.coverage,
+    })
 
 
 def _sse_event(payload: dict) -> str:
     # JSON-encoding the payload (rather than writing the raw chunk after
     # "data: ") keeps embedded newlines/quotes from breaking SSE framing.
-    return f"data: {json.dumps(payload)}\n\n"
+    return f"data: {json.dumps(_jsonable(payload))}\n\n"
 
 
-def _query_stream_gen(df: pd.DataFrame, question: str):
+def _query_stream_gen(session: Session, question: str):
     if not _llm_semaphore.acquire(blocking=False):
         yield _sse_event({"error": _LLM_BUSY_MSG})
         return
     try:
-        context = generate_context(df)
+        context = _build_query_context(session)
+        pieces: list[str] = []
         try:
             provider = get_provider()
-            for chunk in provider.answer_question_stream(question, context):
+            for chunk in provider.answer_question_stream(question, context.text):
+                pieces.append(chunk)
                 yield _sse_event({"delta": chunk})
         except Exception as e:
             yield _sse_event({"error": f"LLM error: {e}"})
             return
+        # Validation runs on the assembled answer once streaming completes, so
+        # the user sees text immediately and the trust signal arrives with it.
+        validation = validate_answer("".join(pieces), context)
+        # Emitted when there is something to report either way — a warning, or
+        # confirmation that the figures matched. An answer containing no
+        # numbers has nothing to say, so the wire stays quiet.
+        if validation.warnings or validation.verified_count:
+            yield _sse_event({"validation": validation.to_dict()})
         yield _sse_event({"done": True})
     finally:
         _llm_semaphore.release()
@@ -247,9 +345,9 @@ def _query_stream_gen(df: pd.DataFrame, question: str):
 
 @app.post("/query/stream")
 def query_stream(req: QueryReq):
-    df = _session(req.session_id)
+    session = _get_session(req.session_id)
     return StreamingResponse(
-        _query_stream_gen(df, req.question),
+        _query_stream_gen(session, req.question),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -260,17 +358,31 @@ def stats(session_id: str, column: str = Query(...)):
     df = _session(session_id)
     if column not in df.columns:
         raise HTTPException(400, f"Column '{column}' not found.")
-    s = df[column]
-    if not pd.api.types.is_numeric_dtype(s):
+    if not pd.api.types.is_numeric_dtype(df[column]):
         raise HTTPException(400, f"Column '{column}' is not numeric.")
-    return {k: _clean(v) for k, v in compute_statistics(s).items()}
+    return _jsonable(compute_statistics(df[column]))
 
 
 @app.get("/correlation/{session_id}")
 def correlation(session_id: str, method: Literal["pearson", "spearman"] = Query("pearson")):
     df = _session(session_id)
     pairs = compute_correlations(df, method=method)
-    return {"method": method, "pairs": [{k: _clean(v) for k, v in p.items()} for p in pairs]}
+    excluded = pairs[0].pop("_excluded_columns", []) if pairs else []
+    significant = [p for p in pairs if p.get("significant")]
+    return _jsonable({
+        "method": method,
+        "pairs": pairs,
+        "tests_run": len(pairs),
+        "significant_count": len(significant),
+        "fdr_alpha": 0.05,
+        "excluded_columns": excluded,
+        "note": (
+            f"{len(pairs)} column pairs were tested at once. Significance is judged "
+            f"on Benjamini-Hochberg q-values, not raw p-values — at this many tests, "
+            f"roughly {max(1, round(len(pairs) * 0.05))} pairs would look significant "
+            f"by chance alone."
+        ) if pairs else "Fewer than two usable numeric columns — nothing to correlate.",
+    })
 
 
 class RegressionReq(BaseModel):
@@ -284,9 +396,9 @@ def regression(req: RegressionReq):
     df = _session(req.session_id)
     try:
         result = perform_linear_regression(df, req.x_col, req.y_col)
-        return {k: _clean(v) for k, v in result.as_dict().items()}
-    except Exception as e:
+    except ValueError as e:
         raise HTTPException(400, str(e))
+    return _jsonable(result.as_dict())
 
 
 class ChartReq(BaseModel):
@@ -299,6 +411,12 @@ class ChartReq(BaseModel):
 @app.post("/chart")
 def chart(req: ChartReq):
     df = _session(req.session_id)
+    # Without this, an unknown type renders a PNG reading "Unknown chart type"
+    # and returns it with a 200 — a failure the caller cannot detect.
+    if req.chart_type not in CHART_TYPES:
+        raise HTTPException(
+            400, f"Unknown chart type '{req.chart_type}'. Supported: {', '.join(CHART_TYPES)}."
+        )
     try:
         png = create_chart(df, req.chart_type, req.column, secondary_column=req.x_col)
     except Exception as e:
@@ -330,13 +448,20 @@ def export_csv(session_id: str):
     )
 
 
+def _report_context(session: Session) -> str:
+    """Dataset description for exports, with provenance when it was cleaned."""
+    context = generate_context(session.active)
+    narrative = session.lineage_narrative()
+    return f"{context}\n\nProvenance:\n{narrative}" if narrative else context
+
+
 @app.get("/export/pdf/{session_id}")
 def export_pdf(session_id: str):
     if not EXPORT_OK:
         raise HTTPException(501, "Export dependencies not installed.")
-    df = _session(session_id)
+    session = _get_session(session_id)
     try:
-        pdf = generate_pdf_report(df, generate_context(df))
+        pdf = generate_pdf_report(session.active, _report_context(session))
     except Exception as e:
         raise HTTPException(500, f"PDF generation failed: {e}")
     return Response(content=pdf, media_type="application/pdf",
@@ -347,9 +472,9 @@ def export_pdf(session_id: str):
 def export_docx(session_id: str):
     if not EXPORT_OK:
         raise HTTPException(501, "Export dependencies not installed.")
-    df = _session(session_id)
+    session = _get_session(session_id)
     try:
-        docx = generate_word_report(df, generate_context(df))
+        docx = generate_word_report(session.active, _report_context(session))
     except Exception as e:
         raise HTTPException(500, f"Word report generation failed: {e}")
     return Response(
@@ -364,57 +489,55 @@ def export_docx(session_id: str):
 @app.get("/clean/preview/{session_id}")
 def clean_preview(session_id: str):
     """Detect data quality issues in the original DataFrame without modifying it."""
-    df = _original(session_id)
-    from app.data.cleaner import detect_issues
-    return detect_issues(df)
+    return _jsonable(detect_issues(_original(session_id)))
 
 
 @app.post("/clean/apply/{session_id}")
 def clean_apply(session_id: str, req: CleanReq):
-    """Apply selected cleaning operations and store the result as the cleaned version."""
-    df = _original(session_id)
-    from app.data.cleaner import apply_cleaning
-    ops_dicts = [op.model_dump(exclude_none=True) for op in req.operations]
-    cleaned, warnings = apply_cleaning(df, ops_dicts)
+    """Apply cleaning operations to the raw data and store the result as a version.
+
+    Always transforms the *raw* frame, never the previously cleaned one, so
+    re-applying with different settings cannot compound transformations
+    invisibly. The full lineage is returned with the result.
+    """
+    session = _get_session(session_id)
+    df = session.raw
+    ops = [op.model_dump(exclude_none=True) for op in req.operations]
+
+    cleaned, ledger = apply_cleaning(df, ops)
     if len(cleaned) == 0:
         raise HTTPException(400, "Cleaning would remove all rows. Relax your settings and try again.")
-    _cleaned_sessions[session_id] = cleaned
-    _active_version[session_id] = 'cleaned'
-    return {
+
+    session.set_cleaned(cleaned, ledger)
+    _store.enforce_limits()
+    summary = ledger.summary(len(df))
+
+    return _jsonable({
         "rows_before": len(df),
         "rows_after": len(cleaned),
-        "rows_removed": len(df) - len(cleaned),
+        "rows_removed": summary["rows_removed"],
         "columns_before": len(df.columns),
         "columns_after": len(cleaned.columns),
-        "warnings": warnings,
-    }
+        # Flat list kept for the existing UI; `lineage` carries the full record.
+        "warnings": ledger.warnings,
+        "lineage": ledger.to_dict(len(df)),
+    })
 
 
 @app.post("/clean/version/{session_id}")
 def set_version(session_id: str, req: VersionReq):
     """Switch the active version (original or cleaned) for all downstream endpoints."""
-    if session_id not in _sessions:
-        raise HTTPException(404, "Session not found — upload a dataset first.")
-    if req.version not in ("original", "cleaned"):
+    session = _get_session(session_id)
+    if req.version not in (ORIGINAL, CLEANED):
         raise HTTPException(400, "version must be 'original' or 'cleaned'.")
-    if req.version == "cleaned" and session_id not in _cleaned_sessions:
+    try:
+        session.set_version(req.version)
+    except ValueError:
         raise HTTPException(400, "No cleaned version available. Apply cleaning first.")
-    _active_version[session_id] = req.version
     return {"version": req.version}
 
 
 @app.get("/clean/status/{session_id}")
 def clean_status(session_id: str):
-    """Return whether a cleaned version exists and which version is currently active."""
-    if session_id not in _sessions:
-        raise HTTPException(404, "Session not found — upload a dataset first.")
-    has_cleaned = session_id in _cleaned_sessions
-    version = _active_version.get(session_id, "original")
-    result: dict = {
-        "version": version,
-        "has_cleaned": has_cleaned,
-        "original_rows": len(_sessions[session_id]),
-    }
-    if has_cleaned:
-        result["cleaned_rows"] = len(_cleaned_sessions[session_id])
-    return result
+    """Whether a cleaned version exists, which is active, and how it was produced."""
+    return _jsonable(_get_session(session_id).status())

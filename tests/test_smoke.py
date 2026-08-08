@@ -183,7 +183,7 @@ def test_version_endpoint_validates_input(client):
 # ── Session store ─────────────────────────────────────────────────────────────
 
 def test_session_store_evicts_least_recently_used(client, monkeypatch):
-    monkeypatch.setattr(backend_main, "MAX_SESSIONS", 2)
+    monkeypatch.setattr(backend_main._store, "max_sessions", 2)
     s1 = upload(client)["session_id"]
     s2 = upload(client)["session_id"]
     s3 = upload(client)["session_id"]  # evicts s1
@@ -280,3 +280,144 @@ def test_chart_endpoint_returns_png(client):
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
     assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_correlation_response_explains_multiple_testing(client):
+    sid = upload(client)["session_id"]
+    body = client.get(f"/correlation/{sid}").json()
+    assert "significant_count" in body and "tests_run" in body
+    assert body["fdr_alpha"] == 0.05
+    assert all("q_value" in p for p in body["pairs"])
+
+
+# ── Profiling and lineage ─────────────────────────────────────────────────────
+
+def test_upload_returns_a_quality_assessment(client):
+    data = upload(client)
+    assert 0 <= data["quality"]["score"] <= 100
+    assert data["quality"]["grade"] in ("excellent", "good", "fair", "poor")
+    assert data["profiles"]["price"]["null_count"] == 1
+
+
+def test_profile_endpoint(client):
+    sid = upload(client)["session_id"]
+    body = client.get(f"/profile/{sid}").json()
+    assert body["version"] == "original"
+    assert body["rows"] == 5
+    assert set(body["profiles"]) == {"name", "score", "price"}
+    assert client.get("/profile/not-a-session").status_code == 404
+
+
+def test_lineage_is_empty_before_any_cleaning(client):
+    sid = upload(client)["session_id"]
+    body = client.get(f"/lineage/{sid}").json()
+    assert body["summary"]["steps"] == 0
+    assert "raw uploaded data" in body["narrative"]
+
+
+def test_clean_apply_returns_a_full_transformation_log(client):
+    sid = upload(client)["session_id"]
+    r = client.post(f"/clean/apply/{sid}", json={"operations": [
+        {"type": "remove_duplicates"},
+        {"type": "fill_nulls", "column": "price", "method": "median"},
+    ]})
+    assert r.status_code == 200, r.text
+    lineage = r.json()["lineage"]
+
+    assert lineage["summary"]["steps"] == 2
+    assert lineage["summary"]["rows_removed"] == 1
+    assert lineage["summary"]["fully_reversible"] is False  # a row was dropped
+    assert [s["operation"] for s in lineage["steps"]] == ["remove_duplicates", "fill_nulls"]
+    assert all(s["rationale"] for s in lineage["steps"])
+    assert "Data loss" in lineage["narrative"]
+
+    # The same log is retrievable afterwards.
+    assert client.get(f"/lineage/{sid}").json()["summary"]["steps"] == 2
+
+
+def test_reapplying_cleaning_starts_from_the_raw_data(client):
+    # Transformations must never silently compound: the second apply is
+    # evaluated against the original upload, not the previous result.
+    sid = upload(client)["session_id"]
+    first = client.post(f"/clean/apply/{sid}", json={
+        "operations": [{"type": "remove_duplicates"}]}).json()
+    assert first["rows_after"] == 4
+
+    second = client.post(f"/clean/apply/{sid}", json={
+        "operations": [{"type": "fill_nulls", "column": "price", "method": "median"}]}).json()
+    assert second["rows_before"] == 5
+    assert second["rows_after"] == 5
+
+
+def test_flagging_outliers_via_the_api_keeps_every_row(client):
+    csv = b"v\n" + b"\n".join(str(i).encode() for i in list(range(40)) + [9999])
+    sid = upload(client, csv, "spread.csv")["session_id"]
+
+    r = client.post(f"/clean/apply/{sid}", json={"operations": [
+        {"type": "flag_outliers", "column": "v"},
+    ]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["rows_removed"] == 0
+    assert body["columns_after"] > body["columns_before"]
+
+    after = client.get(f"/session/{sid}").json()
+    assert after["rows"] == 41
+    assert "v__outlier" in after["columns"]
+
+
+def test_clean_status_carries_the_lineage(client):
+    sid = upload(client)["session_id"]
+    client.post(f"/clean/apply/{sid}", json={"operations": [{"type": "remove_duplicates"}]})
+    status = client.get(f"/clean/status/{sid}").json()
+    assert status["version"] == "cleaned"
+    assert status["lineage"]["summary"]["rows_removed"] == 1
+    assert "memory_mb" in status
+
+
+# ── Grounded answers ──────────────────────────────────────────────────────────
+
+def test_query_returns_a_validation_verdict(client, monkeypatch):
+    sid = upload(client)["session_id"]
+
+    class _Provider:
+        def answer_question(self, question, data_context):
+            # A number nowhere near any column's range — the hallucination
+            # shape this layer exists to catch.
+            return "Average price was 8231947.5 across the dataset."
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _Provider())
+    body = client.post("/query", json={"session_id": sid, "question": "avg price?"}).json()
+    assert body["validation"]["trustworthy"] is False
+    assert body["validation"]["unsupported"] >= 1
+    assert body["context_coverage"]["columns_detailed"] == 3
+
+
+def test_query_context_includes_grounded_facts(client, monkeypatch):
+    sid = upload(client)["session_id"]
+    captured = {}
+
+    class _Provider:
+        def answer_question(self, question, data_context):
+            captured["context"] = data_context
+            return "ok"
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _Provider())
+    client.post("/query", json={"session_id": sid, "question": "hi"})
+    assert "DATASET FACTS" in captured["context"]
+    assert "LIMITS OF THIS CONTEXT" in captured["context"]
+
+
+def test_stream_emits_a_validation_event_when_the_answer_is_doubtful(client, monkeypatch):
+    sid = upload(client)["session_id"]
+
+    class _Provider:
+        def answer_question_stream(self, question, data_context):
+            yield "Total revenue reached "
+            yield "77123456.9 units."
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _Provider())
+    r = client.post("/query/stream", json={"session_id": sid, "question": "revenue?"})
+    events = _sse_events(r.text)
+    assert events[-1] == {"done": True}
+    assert events[-2]["validation"]["trustworthy"] is False
