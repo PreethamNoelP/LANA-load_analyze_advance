@@ -1,9 +1,28 @@
+"""Report generation — PDF and Word summaries of a session.
+
+The exported report is what a user forwards to someone who never touched
+LANA, so it is the one artifact that has to stand on its own. That means it
+carries the same caveats the UI shows: how the data was transformed, what
+was imputed or discarded, which columns are skewed, and the uncertainty
+around every headline number. A report quoting a mean without its confidence
+interval, or a cleaned row count without saying what was removed, is the
+failure mode this module exists to avoid.
+"""
+
 import io
+from typing import Any
 
 import pandas as pd
+from docx import Document
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-from docx import Document
+
+from ..analysis.statistics import compute_statistics
+from ..data.profile import ColumnProfile
+
+# A report is a summary, not a data dump. Past this many columns the per
+# column detail stops being readable and the file stops being shareable.
+MAX_DETAIL_COLUMNS = 40
 
 
 def _pdf_text(text: str) -> str:
@@ -15,80 +34,184 @@ def _pdf_text(text: str) -> str:
     return str(text).encode("latin-1", "replace").decode("latin-1")
 
 
-def generate_pdf_report(df: pd.DataFrame, context: str) -> bytes:
-    """Generate a PDF summary report for the uploaded dataset."""
+def _numeric_summary_lines(
+    df: pd.DataFrame,
+    profiles: dict[str, ColumnProfile] | None,
+) -> list[tuple[str, list[str]]]:
+    """Per-column headline figures, each with its uncertainty and caveats."""
+    out: list[tuple[str, list[str]]] = []
+    numeric_cols = df.select_dtypes("number").columns.tolist()[:MAX_DETAIL_COLUMNS]
+
+    for col in numeric_cols:
+        profile = profiles.get(col) if profiles else None
+        if profile is not None and not profile.is_numeric_measure:
+            # Identifiers and LANA's own annotation columns are numeric by
+            # dtype but averaging them is meaningless.
+            continue
+
+        stats = compute_statistics(df[col])
+        centre = stats.get("robust_center", "mean")
+        headline = (
+            f"{col}: {centre} = "
+            f"{stats.get(centre if centre in stats else 'mean')}"
+            f", range {stats.get('min')} to {stats.get('max')}"
+            f", n = {stats.get('count'):,}"
+            f", {stats.get('null_count'):,} missing"
+        )
+        detail: list[str] = []
+        if stats.get("ci95_low") is not None:
+            detail.append(
+                f"95% CI for the mean: {stats['ci95_low']} to {stats['ci95_high']}"
+            )
+        if stats.get("shape") and stats["shape"] != "unknown":
+            detail.append(f"Distribution is {stats['shape']}; trust the {centre}.")
+        detail.extend(stats.get("caveats", [])[:2])
+        out.append((headline, detail))
+
+    return out
+
+
+# ── PDF ──────────────────────────────────────────────────────────────────────
+
+def generate_pdf_report(
+    df: pd.DataFrame,
+    context: str,
+    *,
+    quality: dict[str, Any] | None = None,
+    lineage: str | None = None,
+    profiles: dict[str, ColumnProfile] | None = None,
+) -> bytes:
+    """Generate a PDF summary report for the dataset.
+
+    ``quality``, ``lineage`` and ``profiles`` are optional so existing callers
+    keep working; supplying them is what turns the file from a statistics dump
+    into a defensible report.
+    """
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
+    def heading(text: str, size: int = 13) -> None:
+        pdf.set_font("helvetica", "B", size)
+        pdf.cell(0, 9, _pdf_text(text), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    def body(text: str, size: int = 9, indent: str = "  ") -> None:
+        pdf.set_font("helvetica", "", size)
+        pdf.multi_cell(0, 5, _pdf_text(f"{indent}{text}"),
+                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
     pdf.set_font("helvetica", "B", 18)
-    pdf.cell(0, 12, "LANA Analysis Report", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 12, "LANA Analysis Report", align="C",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(4)
 
-    pdf.set_font("helvetica", "B", 13)
-    pdf.cell(0, 9, "Dataset Overview", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(0, 7, f"  Rows: {len(df):,}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(0, 7, f"  Columns: {len(df.columns)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.multi_cell(0, 7, _pdf_text(f"  Column names: {', '.join(df.columns.tolist())}"),
-                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    # ── Overview ─────────────────────────────────────────────────────────────
+    heading("Dataset Overview")
+    body(f"Rows: {len(df):,}")
+    body(f"Columns: {len(df.columns)}")
+    body(f"Column names: {', '.join(str(c) for c in df.columns)}")
     pdf.ln(3)
 
-    pdf.set_font("helvetica", "B", 13)
-    pdf.cell(0, 9, "Data Profile", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.set_font("helvetica", "", 9)
-    for line in context.splitlines():
-        pdf.multi_cell(0, 5, _pdf_text(f"  {line}"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.ln(3)
-
-    numeric_cols = df.select_dtypes("number").columns.tolist()
-    if numeric_cols:
-        pdf.set_font("helvetica", "B", 13)
-        pdf.cell(0, 9, "Numeric Column Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        pdf.set_font("helvetica", "", 9)
-        for col in numeric_cols:
-            s = df[col].dropna()
-            pdf.multi_cell(
-                0, 5,
-                _pdf_text(
-                    f"  {col}: "
-                    f"mean={s.mean():.4g}, std={s.std():.4g}, "
-                    f"min={s.min():.4g}, max={s.max():.4g}, "
-                    f"nulls={df[col].isnull().sum()}"
-                ),
-                new_x=XPos.LMARGIN, new_y=YPos.NEXT,
-            )
+    # ── Data quality ─────────────────────────────────────────────────────────
+    if quality:
+        heading("Data Quality")
+        body(f"Score: {quality.get('score')} / 100 ({quality.get('grade')})")
+        body(f"Missing cells: {quality.get('missing_cells', 0):,} "
+             f"({quality.get('missing_pct', 0)}%)")
+        for issue in quality.get("issues", []):
+            body(f"- {issue['detail']}")
+        if quality.get("skewed_columns"):
+            body("- Highly skewed (read the median, not the mean): "
+                 f"{', '.join(quality['skewed_columns'])}")
         pdf.ln(3)
+
+    # ── Provenance ───────────────────────────────────────────────────────────
+    # Placed before the numbers deliberately: a reader must know what was done
+    # to the data before they read statistics computed from it.
+    if lineage:
+        heading("How This Data Was Produced")
+        for line in lineage.splitlines():
+            if line.strip():
+                body(line.strip(), indent="  ")
+        pdf.ln(3)
+
+    # ── Per-column figures with uncertainty ──────────────────────────────────
+    summaries = _numeric_summary_lines(df, profiles)
+    if summaries:
+        heading("Numeric Column Summary")
+        for headline, detail in summaries:
+            body(headline)
+            for line in detail:
+                body(line, size=8, indent="      ")
+        pdf.ln(3)
+
+    # ── Raw profile block ────────────────────────────────────────────────────
+    heading("Data Profile")
+    for line in context.splitlines():
+        body(line, indent="  ")
 
     return bytes(pdf.output())
 
 
-def generate_word_report(df: pd.DataFrame, context: str) -> bytes:
-    """Generate a Word document summary report for the uploaded dataset."""
+# ── Word ─────────────────────────────────────────────────────────────────────
+
+def generate_word_report(
+    df: pd.DataFrame,
+    context: str,
+    *,
+    quality: dict[str, Any] | None = None,
+    lineage: str | None = None,
+    profiles: dict[str, ColumnProfile] | None = None,
+) -> bytes:
+    """Generate a Word summary report for the dataset."""
     doc = Document()
     doc.add_heading("LANA Analysis Report", level=0)
 
     doc.add_heading("Dataset Overview", level=1)
     doc.add_paragraph(f"Rows: {len(df):,}", style="List Bullet")
     doc.add_paragraph(f"Columns: {len(df.columns)}", style="List Bullet")
-    doc.add_paragraph(f"Column names: {', '.join(df.columns.tolist())}", style="List Bullet")
+    doc.add_paragraph(
+        f"Column names: {', '.join(str(c) for c in df.columns)}", style="List Bullet"
+    )
+
+    if quality:
+        doc.add_heading("Data Quality", level=1)
+        doc.add_paragraph(
+            f"Score: {quality.get('score')} / 100 ({quality.get('grade')})",
+            style="List Bullet",
+        )
+        doc.add_paragraph(
+            f"Missing cells: {quality.get('missing_cells', 0):,} "
+            f"({quality.get('missing_pct', 0)}%)",
+            style="List Bullet",
+        )
+        for issue in quality.get("issues", []):
+            doc.add_paragraph(issue["detail"], style="List Bullet")
+        if quality.get("skewed_columns"):
+            doc.add_paragraph(
+                "Highly skewed (read the median, not the mean): "
+                f"{', '.join(quality['skewed_columns'])}",
+                style="List Bullet",
+            )
+
+    if lineage:
+        doc.add_heading("How This Data Was Produced", level=1)
+        for line in lineage.splitlines():
+            if line.strip():
+                doc.add_paragraph(line.strip(), style="List Bullet")
+
+    summaries = _numeric_summary_lines(df, profiles)
+    if summaries:
+        doc.add_heading("Numeric Column Summary", level=1)
+        for headline, detail in summaries:
+            doc.add_paragraph(headline, style="List Bullet")
+            for line in detail:
+                doc.add_paragraph(line, style="List Bullet 2")
 
     doc.add_heading("Data Profile", level=1)
     for line in context.splitlines():
         if line.strip():
             doc.add_paragraph(line, style="List Bullet")
-
-    numeric_cols = df.select_dtypes("number").columns.tolist()
-    if numeric_cols:
-        doc.add_heading("Numeric Column Summary", level=1)
-        for col in numeric_cols:
-            s = df[col].dropna()
-            doc.add_paragraph(
-                f"{col}: mean={s.mean():.4g}, std={s.std():.4g}, "
-                f"min={s.min():.4g}, max={s.max():.4g}, "
-                f"nulls={df[col].isnull().sum()}",
-                style="List Bullet",
-            )
 
     buf = io.BytesIO()
     doc.save(buf)
