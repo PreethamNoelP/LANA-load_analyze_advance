@@ -73,6 +73,12 @@ class OpenAICompatProvider(LLMProvider):
             stream=True,
         )
         for chunk in stream:
+            # `choices` is empty on the usage-only final chunk that Azure and
+            # several OpenAI-compatible proxies emit. Indexing it blindly
+            # raises IndexError mid-answer, which surfaces as the stream dying
+            # partway through a reply that was otherwise fine.
+            if not chunk.choices:
+                continue
             content = chunk.choices[0].delta.content
             if content:
                 yield content

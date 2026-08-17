@@ -173,12 +173,12 @@ def _strength_label(r: float) -> str:
     return "negligible"
 
 
-def compute_correlations(
+def _correlate(
     df: pd.DataFrame,
     method: Literal["pearson", "spearman"] = "pearson",
     alpha: float = FDR_ALPHA,
-) -> list[dict[str, Any]]:
-    """Pairwise correlation between numeric column pairs, ranked by strength.
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run the correlation scan, returning ``(pairs, metadata)``.
 
     Rows with a null in either column of a pair are dropped before computing
     that pair's correlation (pairwise deletion), so ``n`` differs per pair.
@@ -187,8 +187,13 @@ def compute_correlations(
 
     Every returned pair carries a Benjamini-Hochberg q-value alongside its raw
     p-value, and ``significant`` is judged on the q-value. Columns that are
-    identifiers or encoded categories are excluded: correlating a row ID with
-    a measurement produces a real-looking coefficient that means nothing.
+    identifiers, encoded categories or LANA annotations are excluded:
+    correlating a row ID with a measurement produces a real-looking
+    coefficient that means nothing.
+
+    Metadata is returned separately rather than attached to the first pair,
+    because the exclusions matter most in the case where there are no pairs
+    at all — an empty result with no explanation is the least useful answer.
     """
     profiles = profile_dataframe(df)
     numeric_cols = [
@@ -237,8 +242,28 @@ def compute_correlations(
             "n": int(len(pair)),
         })
 
+    notes = list(excluded)
+    if truncated_columns:
+        notes.append({
+            "column": f"+{len(truncated_columns)} more numeric columns",
+            "reason": f"only the first {MAX_CORRELATION_COLUMNS} numeric columns were tested",
+        })
+    if sampled:
+        notes.append({
+            "column": "(all)",
+            "reason": f"computed on a fixed random sample of {MAX_CORRELATION_ROWS:,} "
+                      f"rows out of {len(df):,}",
+        })
+    meta: dict[str, Any] = {
+        "excluded_columns": notes,
+        "sampled": sampled,
+        "usable_columns": numeric_cols,
+    }
+
     if not raw:
-        return []
+        # No pairs is a legitimate outcome, not an error — but it is only
+        # interpretable alongside what was left out of the scan.
+        return [], {**meta, "tests_run": 0}
 
     q_values = _bh_qvalues([r["p_value"] for r in raw])
     tests = len(raw)
@@ -256,24 +281,59 @@ def compute_correlations(
         entry["interpretation"] = _describe_correlation(entry, method, tests)
 
     raw.sort(key=lambda e: abs(e["correlation"]), reverse=True)
+    return raw, {**meta, "tests_run": tests}
 
-    notes = list(excluded)
-    if truncated_columns:
-        notes.append({
-            "column": f"+{len(truncated_columns)} more numeric columns",
-            "reason": f"only the first {MAX_CORRELATION_COLUMNS} numeric columns were tested",
-        })
-    if sampled:
-        notes.append({
-            "column": "(all)",
-            "reason": f"computed on a fixed random sample of {MAX_CORRELATION_ROWS:,} "
-                      f"rows out of {len(df):,}",
-        })
-    if notes:
-        # Attached to the first row so the caller can surface it without a
-        # separate response shape. Consumers that ignore it lose nothing.
-        raw[0]["_excluded_columns"] = notes
-    return raw
+
+def compute_correlations(
+    df: pd.DataFrame,
+    method: Literal["pearson", "spearman"] = "pearson",
+    alpha: float = FDR_ALPHA,
+) -> list[dict[str, Any]]:
+    """Correlated column pairs, strongest first. See :func:`_correlate`."""
+    return _correlate(df, method, alpha)[0]
+
+
+def analyze_correlations(
+    df: pd.DataFrame,
+    method: Literal["pearson", "spearman"] = "pearson",
+    alpha: float = FDR_ALPHA,
+) -> dict[str, Any]:
+    """Correlation scan plus the context needed to read it honestly.
+
+    Reports which columns were excluded and why, how many tests were run, and
+    what share of them would look significant by chance alone — the figures
+    that turn a ranked list into an interpretable result.
+    """
+    pairs, meta = _correlate(df, method, alpha)
+    tests = meta["tests_run"]
+
+    if tests:
+        note = (
+            f"{tests} column pairs were tested at once. Significance is judged on "
+            f"Benjamini-Hochberg q-values, not raw p-values — at this many tests, "
+            f"roughly {max(1, round(tests * alpha))} pairs would look significant "
+            f"by chance alone."
+        )
+    elif len(meta["usable_columns"]) < 2:
+        note = (
+            "Fewer than two columns qualify as numeric measurements, so there is "
+            "nothing to correlate."
+            + (f" Excluded: {', '.join(c['column'] for c in meta['excluded_columns'])}."
+               if meta["excluded_columns"] else "")
+        )
+    else:
+        note = "No column pair had enough overlapping non-null values to correlate."
+
+    return {
+        "method": method,
+        "pairs": pairs,
+        "tests_run": tests,
+        "significant_count": sum(1 for p in pairs if p.get("significant")),
+        "fdr_alpha": alpha,
+        "excluded_columns": meta["excluded_columns"],
+        "sampled": meta["sampled"],
+        "note": note,
+    }
 
 
 def _describe_correlation(entry: dict[str, Any], method: str, tests: int) -> str:

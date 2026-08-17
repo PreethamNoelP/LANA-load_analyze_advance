@@ -1,7 +1,9 @@
 import sys
 import io
 import json
+import logging
 import os
+import re
 import uuid
 import math
 import threading
@@ -23,8 +25,8 @@ from app.llm.context import build_context
 from app.llm.validation import validate_answer
 from app.llm.ollama_provider import OllamaProvider
 from app.analysis.statistics import (
+    analyze_correlations,
     compute_statistics,
-    compute_correlations,
     generate_context,
     generate_recommendations,
 )
@@ -39,6 +41,8 @@ try:
     EXPORT_OK = True
 except ImportError:
     EXPORT_OK = False
+
+logger = logging.getLogger("lana")
 
 app = FastAPI(title="LANA API", version="2.0.0")
 
@@ -64,6 +68,48 @@ SESSION_TTL_SECONDS = float(os.getenv("LANA_SESSION_TTL_SECONDS", "3600"))
 MAX_CONCURRENT_LLM = int(os.getenv("LANA_MAX_CONCURRENT_LLM", "2"))
 _llm_semaphore = threading.Semaphore(MAX_CONCURRENT_LLM)
 _LLM_BUSY_MSG = "The AI is busy answering other questions right now — try again in a moment."
+_LLM_DOWN_MSG = (
+    "The local AI model is not reachable. Check that Ollama is running "
+    "(`ollama serve`) and that the model in your .env has been pulled "
+    "(`ollama pull <model>`). Every other tab — profiling, cleaning, charts, "
+    "statistics — works without it."
+)
+
+
+# Provider error text is written by the upstream endpoint, not by LANA, and it
+# is echoed to the browser. Left raw it discloses the operator's configuration
+# — a 404 from a mistyped base URL returns the provider's hostname and route to
+# every visitor. Strip anything that identifies the endpoint or looks like a
+# credential, keep the part that actually helps ("model not found").
+_URL_RE = re.compile(r"https?://\S+")
+_ADDR_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b|\blocalhost:\d+\b", re.I)
+_TOKEN_RE = re.compile(r"\b(?:sk|gsk|ghp|xoxb|Bearer)[-_ ][A-Za-z0-9._-]{8,}", re.I)
+_MAX_ERROR_CHARS = 300
+
+
+def _sanitize_llm_error(text: str) -> str:
+    for pattern, repl in ((_URL_RE, "[endpoint]"), (_ADDR_RE, "[address]"),
+                          (_TOKEN_RE, "[redacted]")):
+        text = pattern.sub(repl, text)
+    text = " ".join(text.split())
+    return text[:_MAX_ERROR_CHARS] + ("…" if len(text) > _MAX_ERROR_CHARS else "")
+
+
+def _llm_error(exc: Exception) -> tuple[int, str]:
+    """Map a provider exception to an HTTP status and a safe, actionable message.
+
+    A connection failure is by far the most common one, has nothing to do with
+    the question asked, and is fixable by the user — so it becomes a 503 with
+    instructions rather than a 500 carrying a raw traceback string. Anything
+    else is a genuine fault, reported with its detail sanitised.
+    """
+    text = str(exc)
+    if any(k in text.lower() for k in ("connect", "refused", "timed out", "timeout",
+                                       "unreachable", "no route", "actively refused")):
+        return 503, _LLM_DOWN_MSG
+    # Full detail stays in the server log for whoever runs the process.
+    logger.warning("LLM request failed", exc_info=exc)
+    return 500, f"LLM error: {_sanitize_llm_error(text)}"
 
 _store = SessionStore(
     max_sessions=MAX_SESSIONS,
@@ -294,7 +340,7 @@ def query(req: QueryReq):
         provider = get_provider()
         answer = provider.answer_question(req.question, context.text)
     except Exception as e:
-        raise HTTPException(500, f"LLM error: {e}")
+        raise HTTPException(*_llm_error(e))
     finally:
         _llm_semaphore.release()
 
@@ -328,7 +374,7 @@ def _query_stream_gen(session: Session, question: str):
                 pieces.append(chunk)
                 yield _sse_event({"delta": chunk})
         except Exception as e:
-            yield _sse_event({"error": f"LLM error: {e}"})
+            yield _sse_event({"error": _llm_error(e)[1]})
             return
         # Validation runs on the assembled answer once streaming completes, so
         # the user sees text immediately and the trust signal arrives with it.
@@ -365,24 +411,7 @@ def stats(session_id: str, column: str = Query(...)):
 
 @app.get("/correlation/{session_id}")
 def correlation(session_id: str, method: Literal["pearson", "spearman"] = Query("pearson")):
-    df = _session(session_id)
-    pairs = compute_correlations(df, method=method)
-    excluded = pairs[0].pop("_excluded_columns", []) if pairs else []
-    significant = [p for p in pairs if p.get("significant")]
-    return _jsonable({
-        "method": method,
-        "pairs": pairs,
-        "tests_run": len(pairs),
-        "significant_count": len(significant),
-        "fdr_alpha": 0.05,
-        "excluded_columns": excluded,
-        "note": (
-            f"{len(pairs)} column pairs were tested at once. Significance is judged "
-            f"on Benjamini-Hochberg q-values, not raw p-values — at this many tests, "
-            f"roughly {max(1, round(len(pairs) * 0.05))} pairs would look significant "
-            f"by chance alone."
-        ) if pairs else "Fewer than two usable numeric columns — nothing to correlate.",
-    })
+    return _jsonable(analyze_correlations(_session(session_id), method=method))
 
 
 class RegressionReq(BaseModel):
@@ -448,11 +477,20 @@ def export_csv(session_id: str):
     )
 
 
-def _report_context(session: Session) -> str:
-    """Dataset description for exports, with provenance when it was cleaned."""
-    context = generate_context(session.active)
-    narrative = session.lineage_narrative()
-    return f"{context}\n\nProvenance:\n{narrative}" if narrative else context
+def _report_inputs(session: Session) -> dict:
+    """Everything a self-contained report needs about the active version.
+
+    The exported file travels to people who never used LANA, so it carries the
+    same provenance and caveats the UI shows rather than bare statistics.
+    """
+    df = session.active
+    profiles = profile_dataframe(df)
+    return {
+        "context": generate_context(df),
+        "quality": dataset_quality(profiles, len(df)),
+        "lineage": session.lineage_narrative(),
+        "profiles": profiles,
+    }
 
 
 @app.get("/export/pdf/{session_id}")
@@ -460,8 +498,13 @@ def export_pdf(session_id: str):
     if not EXPORT_OK:
         raise HTTPException(501, "Export dependencies not installed.")
     session = _get_session(session_id)
+    inputs = _report_inputs(session)
     try:
-        pdf = generate_pdf_report(session.active, _report_context(session))
+        pdf = generate_pdf_report(
+            session.active, inputs["context"],
+            quality=inputs["quality"], lineage=inputs["lineage"],
+            profiles=inputs["profiles"],
+        )
     except Exception as e:
         raise HTTPException(500, f"PDF generation failed: {e}")
     return Response(content=pdf, media_type="application/pdf",
@@ -473,8 +516,13 @@ def export_docx(session_id: str):
     if not EXPORT_OK:
         raise HTTPException(501, "Export dependencies not installed.")
     session = _get_session(session_id)
+    inputs = _report_inputs(session)
     try:
-        docx = generate_word_report(session.active, _report_context(session))
+        docx = generate_word_report(
+            session.active, inputs["context"],
+            quality=inputs["quality"], lineage=inputs["lineage"],
+            profiles=inputs["profiles"],
+        )
     except Exception as e:
         raise HTTPException(500, f"Word report generation failed: {e}")
     return Response(

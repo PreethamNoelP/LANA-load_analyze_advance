@@ -235,14 +235,17 @@ def test_query_stream_reports_llm_errors_as_sse_event(client, monkeypatch):
     class _FailingProvider:
         def answer_question_stream(self, question, data_context):
             yield "partial "
-            raise RuntimeError("model unreachable")
+            # Deliberately not connection-shaped: those map to a dedicated
+            # "start Ollama" message, covered separately. A genuine model
+            # fault must still reach the user with its own detail intact.
+            raise RuntimeError("model produced an invalid response")
 
     monkeypatch.setattr(backend_main, "get_provider", lambda: _FailingProvider())
     r = client.post("/query/stream", json={"session_id": sid, "question": "hi"})
     assert r.status_code == 200  # headers already sent; error travels inside the stream
     events = _sse_events(r.text)
     assert events[0] == {"delta": "partial "}
-    assert "model unreachable" in events[1]["error"]
+    assert "invalid response" in events[1]["error"]
 
 
 def test_query_stream_rejects_unknown_session(client):
@@ -280,6 +283,111 @@ def test_chart_endpoint_returns_png(client):
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
     assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_failed_charts_do_not_leak_figures(client):
+    # Regression: the figure was created before any validation ran, so every
+    # rejected request pinned one in pyplot's global registry forever.
+    import matplotlib.pyplot as plt
+
+    sid = upload(client)["session_id"]
+    before = len(plt.get_fignums())
+    for _ in range(5):
+        client.post("/chart", json={"session_id": sid, "column": "nope",
+                                    "chart_type": "Histogram"})
+    for _ in range(5):
+        client.post("/chart", json={"session_id": sid, "column": "score",
+                                    "chart_type": "Histogram"})
+    assert len(plt.get_fignums()) == before
+
+
+def test_chart_rejects_unknown_type_instead_of_drawing_the_error(client):
+    sid = upload(client)["session_id"]
+    r = client.post("/chart", json={"session_id": sid, "column": "score",
+                                    "chart_type": "Sunburst"})
+    assert r.status_code == 400
+    assert "Sunburst" in r.json()["detail"]
+
+
+def test_heatmap_excludes_ids_and_annotations(client):
+    # The heatmap must agree with /correlation: an outlier score correlates
+    # 1.0 with its source column by construction and is not a finding.
+    rows = "\n".join(f"{1000+i},{i * 3 + 1}" for i in range(40))
+    sid = upload(client, f"user_id,revenue\n{rows}\n".encode(), "ids.csv")["session_id"]
+    client.post(f"/clean/apply/{sid}", json={"operations": [
+        {"type": "flag_outliers", "column": "revenue"},
+    ]})
+    excluded = {c["column"] for c in client.get(f"/correlation/{sid}").json()["excluded_columns"]}
+    assert "user_id" in excluded
+    assert "revenue__outlier_score" in excluded
+    # The chart renders rather than erroring, having dropped those columns.
+    r = client.post("/chart", json={"session_id": sid, "column": "revenue",
+                                    "chart_type": "Heatmap"})
+    assert r.status_code == 200 and r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_non_numeric_column_explains_itself_rather_than_failing(client):
+    sid = upload(client)["session_id"]
+    r = client.post("/chart", json={"session_id": sid, "column": "name",
+                                    "chart_type": "Histogram"})
+    assert r.status_code == 200  # renders a chart carrying the explanation
+
+
+def test_provider_errors_do_not_leak_endpoint_or_credentials(client, monkeypatch):
+    # The error body is written by the upstream provider and echoed to the
+    # browser. A mistyped base URL used to return the operator's hostname and
+    # route to every visitor.
+    sid = upload(client)["session_id"]
+
+    class _Leaky:
+        def answer_question(self, question, data_context):
+            raise RuntimeError(
+                "Error code: 404 - Unknown request URL: POST /openai/v1/bogus. "
+                "See https://console.groq.com/docs using key gsk_EXAMPLE_NOT_A_REAL_KEY "
+                "at 10.255.255.1:9999"
+            )
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _Leaky())
+    detail = client.post("/query", json={"session_id": sid, "question": "hi"}).json()["detail"]
+
+    for leak in ("groq.com", "gsk_EXAMPLE_NOT_A_REAL_KEY", "10.255.255.1", "9999"):
+        assert leak not in detail, f"leaked {leak!r}"
+    assert "404" in detail  # the useful part survives
+
+
+def test_unreachable_model_gives_an_actionable_error(client, monkeypatch):
+    sid = upload(client)["session_id"]
+
+    class _Down:
+        def answer_question(self, question, data_context):
+            raise ConnectionError("connection refused to localhost:11434")
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _Down())
+    r = client.post("/query", json={"session_id": sid, "question": "hi"})
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert "ollama serve" in detail.lower()
+    assert "11434" not in detail  # the raw exception text is not leaked back
+
+
+def test_exports_carry_quality_and_provenance(client):
+    sid = upload(client)["session_id"]
+    client.post(f"/clean/apply/{sid}", json={"operations": [{"type": "remove_duplicates"}]})
+
+    docx = client.get(f"/export/docx/{sid}")
+    assert docx.status_code == 200 and docx.content[:2] == b"PK"
+
+    # A .docx is a zip of XML — the report text is searchable inside it.
+    import io as _io
+    import zipfile
+    with zipfile.ZipFile(_io.BytesIO(docx.content)) as z:
+        xml = z.read("word/document.xml").decode("utf-8")
+    assert "Data Quality" in xml
+    assert "How This Data Was Produced" in xml
+    assert "remove_duplicates" in xml          # the lineage step
+    assert "Data loss" in xml                  # the row it discarded
+
+    assert client.get(f"/export/pdf/{sid}").status_code == 200
 
 
 def test_correlation_response_explains_multiple_testing(client):
