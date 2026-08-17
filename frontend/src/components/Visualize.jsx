@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { getChartBlob } from '../api.js'
 
 const CHART_TYPES = [
@@ -23,6 +23,16 @@ export default function Visualize({ session }) {
 
   const needsX = chartType === 'Scatter Plot'
   const columnOptions = ANY_COLUMN_CHARTS.includes(chartType) ? allColumns : numericColumns
+
+  // A blob URL pins its PNG in browser memory until explicitly revoked, so
+  // every chart generated would otherwise leak a full-size image for the life
+  // of the page. Cleaning up in the effect (rather than only on unmount)
+  // releases each chart as soon as the next replaces it. Safe under
+  // StrictMode's double-invoked mount effect because imgUrl is null then.
+  useEffect(() => {
+    if (!imgUrl) return
+    return () => URL.revokeObjectURL(imgUrl)
+  }, [imgUrl])
 
   function handleChartTypeChange(newType) {
     setChartType(newType)
