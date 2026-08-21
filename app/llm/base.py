@@ -5,13 +5,26 @@ from collections.abc import Iterator
 # answer. Its job is to make "the data does not say" a cheaper response for
 # the model than inventing a figure — small local models default to filling
 # gaps fluently unless refusal is explicitly licensed and demonstrated.
+#
+# Rule 2 originally licensed refusal with one concrete, worked example.
+# eval/ (run against phi3:mini) showed the model pattern-matching that
+# example almost verbatim and reusing it as a refusal template regardless of
+# whether the fact was actually present — including on trivial questions the
+# DATASET FACTS section answers directly. Small models overfitting to a
+# single few-shot example is a known failure mode; the fix is a "check
+# before you refuse" instruction plus a contrasting example of the
+# present-fact case, so the model has two patterns to discriminate between
+# instead of one to copy.
 ANSWER_SYSTEM_PROMPT = """You are LANA's data analyst. You answer questions strictly from the dataset facts supplied to you.
 
 RULES — follow all of them:
 
 1. GROUNDING. Use only numbers that appear in the DATASET FACTS section, or that you compute from them. Show which stated figures a computed number came from. Never estimate, guess, or recall a number from general knowledge.
 
-2. REFUSAL IS A CORRECT ANSWER. If the facts do not contain what was asked, say exactly what is missing and stop. For example: "The provided data does not include per-customer revenue, so I cannot answer that. It has revenue totals by region only." Never substitute a plausible-sounding figure. An honest "not available" is more useful than a fluent guess.
+2. CHECK BEFORE YOU REFUSE. A refusal is only correct when the fact is genuinely absent — re-read the DATASET FACTS and COLUMNS sections above before deciding something is missing.
+   - If the fact IS stated above: answer directly and name the source, e.g. "The mean revenue is 221.9, from the 'revenue' column above."
+   - If the fact is NOT stated above: say exactly what is missing, e.g. "The facts above do not include per-customer revenue; they list revenue totals by region only." Describe what THIS question is actually missing, in your own words — do not reuse that sentence itself as a template for every question.
+   Never substitute a plausible-sounding figure for a fact that is truly absent. But claiming a fact is missing when it is stated above is just as wrong as inventing one — both are answers not grounded in what was actually given.
 
 3. NO CAUSAL LANGUAGE. Correlations and regression fits are associations. Write "is associated with" or "moves together with", never "causes", "drives", "leads to", or "because of".
 
@@ -45,12 +58,24 @@ class LLMProvider(ABC):
     def _build_prompt(self, question: str, data_context: str) -> str:
         # The question is placed last: models attend most reliably to the end
         # of a long prompt, and the context block dominates the token count.
+        #
+        # eval/ (run against phi3:mini) traced most of that model's
+        # over-refusal to this trailing instruction itself: ending on "if
+        # they do not contain what is needed, say so" put the refusal branch
+        # in the single most-attended position in the entire prompt, so the
+        # model defaulted to it even when the fact was stated plainly earlier
+        # in the same context. Ending on a search-and-answer instruction
+        # instead — with refusal framed explicitly as the last resort rather
+        # than modelled as the sentence to produce — fixed retrieval on every
+        # case tested without weakening genuine refusals; see eval/results/.
         return (
             f"{data_context}\n\n"
             "=== QUESTION ===\n"
             f"{question}\n\n"
-            "Answer using only the facts above. If they do not contain what is "
-            "needed, say so explicitly and name what is missing."
+            "Search COLUMNS, CATEGORY BREAKDOWNS, and GROUP AVERAGES above for "
+            "the exact fact this question needs, and state it directly when "
+            "you find it. Treat \"not available\" as a last resort, not a "
+            "default."
         )
 
     def answer_question(self, question: str, data_context: str) -> str:
