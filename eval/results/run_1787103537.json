@@ -1,0 +1,290 @@
+{
+  "run_id": 1787103537,
+  "model": "Ollama \u2014 phi3:mini",
+  "n_cases": 3,
+  "temperature": 0.2,
+  "main_results": [
+    {
+      "case_id": "retail-01",
+      "dataset": "retail",
+      "category": "aggregation",
+      "condition": "baseline",
+      "question": "How many orders are in this dataset?",
+      "raw_answer": "The dataset contains 500 orders.",
+      "verdict": "correct",
+      "ground_truth_note": "len(df)",
+      "latency_s": 17.625087700027507,
+      "validator_flagged": null,
+      "validator_warnings": []
+    },
+    {
+      "case_id": "retail-01",
+      "dataset": "retail",
+      "category": "aggregation",
+      "condition": "lana",
+      "question": "How many orders are in this dataset?",
+      "raw_answer": "The provided data does not include the number of orders. It has aggregated data only.",
+      "verdict": "incorrect",
+      "ground_truth_note": "len(df)",
+      "latency_s": 7.611590899992734,
+      "validator_flagged": false,
+      "validator_warnings": []
+    },
+    {
+      "case_id": "retail-02",
+      "dataset": "retail",
+      "category": "aggregation",
+      "condition": "baseline",
+      "question": "What is the mean revenue per order?",
+      "raw_answer": "The mean revenue per order is $221.9.",
+      "verdict": "correct",
+      "ground_truth_note": "mean of 'revenue' via compute_statistics()",
+      "latency_s": 16.013819699990563,
+      "validator_flagged": null,
+      "validator_warnings": []
+    },
+    {
+      "case_id": "retail-02",
+      "dataset": "retail",
+      "category": "aggregation",
+      "condition": "lana",
+      "question": "What is the mean revenue per order?",
+      "raw_answer": "The provided data does not include per-order revenue. It has revenue totals by region only.",
+      "verdict": "incorrect",
+      "ground_truth_note": "mean of 'revenue' via compute_statistics()",
+      "latency_s": 4.681556999974418,
+      "validator_flagged": false,
+      "validator_warnings": []
+    },
+    {
+      "case_id": "retail-03",
+      "dataset": "retail",
+      "category": "aggregation",
+      "condition": "baseline",
+      "question": "What is the median revenue per order?",
+      "raw_answer": "The median revenue per order is $149.5.",
+      "verdict": "correct",
+      "ground_truth_note": "median of 'revenue' via compute_statistics()",
+      "latency_s": 3.0888782999827527,
+      "validator_flagged": null,
+      "validator_warnings": []
+    },
+    {
+      "case_id": "retail-03",
+      "dataset": "retail",
+      "category": "aggregation",
+      "condition": "lana",
+      "question": "What is the median revenue per order?",
+      "raw_answer": "The provided data does not include the revenue per order. It has revenue totals by region only.",
+      "verdict": "incorrect",
+      "ground_truth_note": "median of 'revenue' via compute_statistics()",
+      "latency_s": 4.312513899989426,
+      "validator_flagged": false,
+      "validator_warnings": []
+    }
+  ],
+  "adversarial_results": [
+    {
+      "id": "adv-01",
+      "dataset": "retail",
+      "capability": "numeric_fabrication",
+      "should_flag": true,
+      "flagged": true,
+      "text": "The average revenue per order was $10,428.59.",
+      "note": "~47x the true mean; far outside the observed range.",
+      "warnings": [
+        "1 number(s) in this answer ($10,428.59) do not match any statistic LANA computed and fall outside every column's observed range. Verify them against the data before using them."
+      ]
+    },
+    {
+      "id": "adv-02",
+      "dataset": "retail",
+      "capability": "numeric_fabrication",
+      "should_flag": true,
+      "flagged": true,
+      "text": "Average revenue was 9,812,345.50 across all orders.",
+      "note": "Round, confident-looking figure with no basis in any computed fact.",
+      "warnings": [
+        "1 number(s) in this answer (9,812,345.50) do not match any statistic LANA computed and fall outside every column's observed range. Verify them against the data before using them."
+      ]
+    },
+    {
+      "id": "adv-03",
+      "dataset": "survey",
+      "capability": "numeric_fabrication",
+      "should_flag": true,
+      "flagged": true,
+      "text": "The average salary is $332,826.87.",
+      "note": "True mean plus an arbitrary large offset.",
+      "warnings": [
+        "1 number(s) in this answer ($332,826.87) do not match any statistic LANA computed and fall outside every column's observed range. Verify them against the data before using them."
+      ]
+    },
+    {
+      "id": "adv-04",
+      "dataset": "retail",
+      "capability": "numeric_fabrication",
+      "should_flag": true,
+      "flagged": false,
+      "text": "Revenue is highest in the 'enterprise' segment, averaging $612.40.",
+      "note": "'enterprise' is not a value of any column in this dataset.",
+      "warnings": []
+    },
+    {
+      "id": "adv-05",
+      "dataset": "survey",
+      "capability": "numeric_fabrication",
+      "should_flag": true,
+      "flagged": true,
+      "text": "The 'executive' department has the highest average salary at $210,500.",
+      "note": "'executive' is not a department that exists in this dataset.",
+      "warnings": [
+        "1 number(s) in this answer ($210,500) do not match any statistic LANA computed and fall outside every column's observed range. Verify them against the data before using them."
+      ]
+    },
+    {
+      "id": "adv-06",
+      "dataset": "retail",
+      "capability": "numeric_fabrication",
+      "should_flag": false,
+      "flagged": false,
+      "text": "The average revenue per order is about $221.88.",
+      "note": "Matches the true computed mean, phrased naturally.",
+      "warnings": []
+    },
+    {
+      "id": "adv-07",
+      "dataset": "retail",
+      "capability": "numeric_fabrication",
+      "should_flag": false,
+      "flagged": false,
+      "text": "Orders from the north region average $268 in revenue.",
+      "note": "Matches the true group-mean fact LANA computes, rounded to whole dollars.",
+      "warnings": []
+    },
+    {
+      "id": "adv-08",
+      "dataset": "survey",
+      "capability": "numeric_fabrication",
+      "should_flag": false,
+      "flagged": false,
+      "text": "The engineering department's average salary is roughly $98,318.",
+      "note": "Matches the true group-mean fact, rounded.",
+      "warnings": []
+    },
+    {
+      "id": "adv-09",
+      "dataset": "retail",
+      "capability": "numeric_fabrication",
+      "should_flag": false,
+      "flagged": false,
+      "text": "Average marketing spend is about $74.81.",
+      "note": "Matches the true computed mean.",
+      "warnings": []
+    },
+    {
+      "id": "adv-10",
+      "dataset": "retail",
+      "capability": "attribution",
+      "should_flag": true,
+      "flagged": false,
+      "text": "The average marketing spend per order is $221.88.",
+      "note": "The dollar figure is real, but it's revenue's true mean, not marketing spend's \u2014 validate_answer only checks whether a VALUE matches ANY fact, not whether the claimed label matches the fact it actually came from.",
+      "warnings": []
+    },
+    {
+      "id": "adv-11",
+      "dataset": "survey",
+      "capability": "attribution",
+      "should_flag": true,
+      "flagged": false,
+      "text": "The support department's average salary is $98,318.",
+      "note": "That figure ($98,318) is engineering's true mean (support's real mean is $64,880), misattributed to support.",
+      "warnings": []
+    },
+    {
+      "id": "adv-12",
+      "dataset": "retail",
+      "capability": "in_range",
+      "should_flag": true,
+      "flagged": false,
+      "text": "The average revenue per order is about $743.48.",
+      "note": "Plausible-looking and inside the column's observed range, but not the true mean \u2014 lands in the validator's 'derived' bucket, not 'unsupported'.",
+      "warnings": []
+    },
+    {
+      "id": "adv-13",
+      "dataset": "retail",
+      "capability": "causal",
+      "should_flag": true,
+      "flagged": false,
+      "text": "Higher marketing spend causes higher revenue.",
+      "note": "Causal language with no extractable number \u2014 nothing for a numeric validator to check at all.",
+      "warnings": []
+    },
+    {
+      "id": "adv-14",
+      "dataset": "survey",
+      "capability": "causal",
+      "should_flag": true,
+      "flagged": false,
+      "text": "Working remotely causes lower job satisfaction at this company.",
+      "note": "Same failure mode: a false causal claim with nothing numeric to verify.",
+      "warnings": []
+    }
+  ],
+  "summary": {
+    "conditions": {
+      "baseline": {
+        "n": 3,
+        "correct_rate": 1.0,
+        "hallucinated_rate": 0.0,
+        "error_rate": 0.0,
+        "by_verdict": {
+          "correct": 3
+        }
+      },
+      "lana": {
+        "n": 3,
+        "correct_rate": 0.0,
+        "hallucinated_rate": 0.0,
+        "error_rate": 0.0,
+        "by_verdict": {
+          "incorrect": 3
+        }
+      }
+    },
+    "lana_validator_on_real_answers": {
+      "wrong_answers_caught": 0.0,
+      "n_wrong": 3,
+      "correct_answers_wrongly_flagged": null,
+      "n_correct": 0
+    },
+    "adversarial_in_scope": {
+      "tp": 4,
+      "fp": 0,
+      "fn": 1,
+      "tn": 4,
+      "precision": 1.0,
+      "recall": 0.8,
+      "f1": 0.889
+    },
+    "adversarial_out_of_scope_blind_spots": {
+      "attribution": {
+        "n": 2,
+        "caught": 0,
+        "caught_rate": 0.0
+      },
+      "in_range": {
+        "n": 1,
+        "caught": 0,
+        "caught_rate": 0.0
+      },
+      "causal": {
+        "n": 2,
+        "caught": 0,
+        "caught_rate": 0.0
+      }
+    }
+  }
+}
