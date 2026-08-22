@@ -390,6 +390,12 @@ def test_exports_carry_quality_and_provenance(client):
     assert client.get(f"/export/pdf/{sid}").status_code == 200
 
 
+def test_validator_capabilities_endpoint(client):
+    body = client.get("/validator/capabilities").json()
+    assert body["verifies"]
+    assert body["does_not_verify"]
+
+
 def test_correlation_response_explains_multiple_testing(client):
     sid = upload(client)["session_id"]
     body = client.get(f"/correlation/{sid}").json()

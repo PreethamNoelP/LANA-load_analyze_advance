@@ -16,7 +16,7 @@ from app.data.lineage import CleaningLedger
 from app.data.outliers import annotate_outliers, detect_outliers, winsorize_column
 from app.data.profile import ColumnKind, profile_column, profile_dataframe, suggest_imputation
 from app.llm.context import build_context
-from app.llm.validation import validate_answer
+from app.llm.validation import capability_summary, validate_answer
 
 def rng(seed: int = 20260809) -> np.random.Generator:
     """A fresh seeded generator per call.
@@ -431,6 +431,16 @@ def test_validation_is_linear_on_pathological_output(sales_df):
         start = time.perf_counter()
         validate_answer(payload, context)
         assert time.perf_counter() - start < 1.0, f"validation too slow on {payload[:12]}…"
+
+
+def test_capability_summary_names_both_the_scope_and_the_boundary():
+    # This is the single source both the API and the UI panel quote — if it
+    # ever goes empty, the "what LANA checks" disclosure silently breaks.
+    summary = capability_summary()
+    assert set(summary) == {"verifies", "does_not_verify"}
+    for claims in summary.values():
+        assert claims, "capability_summary() must not go empty"
+        assert all(isinstance(c, str) and c for c in claims)
 
 
 def test_validation_notices_invented_column_names(sales_df):
