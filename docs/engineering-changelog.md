@@ -205,3 +205,55 @@ new harness tooling, not a product change.
 not fixes — deciding whether/how to close them (extend `build_context` to
 include regression coefficients; make attribution checkable) is a separate,
 larger change than this entry, and hasn't been made yet.
+
+---
+
+## 2026-08-21 — Make validator boundaries explicit, and document the provenance trace
+
+**Problem.** The previous entry's findings (the attribution blind spot, the
+scope gaps) lived only in this file. `validate_answer()`'s actual coverage
+was real but implicit — a reader had to go through the source to learn what
+it does and doesn't catch, and a user of the app had no way to see it at
+all.
+
+**Solution.**
+- Added `VERIFIED_CLAIM_TYPES` and `KNOWN_BLIND_SPOTS` — two plain-language
+  constant tuples in `app/llm/validation.py` — plus `capability_summary()`,
+  which returns them as a dict. This is the single source of truth: the API
+  and the UI both read it directly rather than each independently
+  describing the boundary in their own words.
+- Added `GET /validator/capabilities` (`backend/main.py`), serving that
+  summary.
+- Added a collapsed-by-default "What LANA checks in every answer" panel to
+  the Ask AI screen (`frontend/src/components/AskAI.jsx`), fetching from
+  the new endpoint. Deliberately not a persistent badge on every message —
+  the warning itself is the signal that matters on every answer; this is
+  for whoever wants to know exactly what "verified" does and doesn't mean,
+  once.
+- Added `docs/provenance.md`: a five-step, code-and-line-referenced trace
+  from question to displayed verdict, with a real worked example and the
+  real organic attribution failure from the eval run as the concrete
+  illustration of the boundary, rather than a hypothetical one.
+
+**Why this approach.** The risk in documenting "what this verifies" in
+prose is that the prose and the code drift apart the first time either one
+changes. Making the API and the UI both read the same two constants the
+validator itself defines closes that gap structurally — there is nothing
+to keep in sync by hand.
+
+**Tradeoff.** None identified — this is additive (new constants, new
+endpoint, new UI panel, new doc) and touches no existing validation logic.
+
+**Tests.** Added `test_capability_summary_names_both_the_scope_and_the_boundary`
+(`tests/test_data_science.py`) and `test_validator_capabilities_endpoint`
+(`tests/test_smoke.py`). Full suite: 84 passed (was 82). Frontend build
+verified clean (`npm run build`). The live endpoint was hit directly with
+`curl` against a real running server to confirm the actual JSON shape, not
+just that the code imports without error. The new UI panel's rendering was
+not visually verified in a browser — no browser tooling was available in
+this session; worth opening the Ask AI screen once to confirm the toggle
+looks and behaves as intended.
+
+**Result.** The boundary from the previous entry is now something a caller
+can point to — in the API response, in the UI, and in a document that
+quotes the exact same source instead of restating it.
