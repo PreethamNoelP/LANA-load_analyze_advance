@@ -29,6 +29,43 @@ from typing import Any
 
 from .context import GroundedContext
 
+# ── What this layer verifies, and what it does not ──────────────────────────
+# Stated once, here, so the API and the "what LANA checks" panel in the UI
+# quote this text directly instead of independently re-describing what the
+# code below does — and drifting from it the first time either one changes.
+
+VERIFIED_CLAIM_TYPES = (
+    "A number in the answer matches a fact LANA computed, within a small "
+    "rounding tolerance (2% relative).",
+    "A quoted or backticked column or category name that does not exist in "
+    "this dataset is caught as an unknown reference.",
+)
+
+KNOWN_BLIND_SPOTS = (
+    "A real, correctly-computed number attached to the wrong label — for "
+    "example, quoting the right figure but naming the wrong column or "
+    "category. This checks whether a VALUE matches any fact, not whether "
+    "the LABEL attached to it is the one that fact actually belongs to.",
+    "A wrong-but-plausible value that happens to fall inside a column's "
+    "observed range. It is marked 'derived' rather than flagged, because a "
+    "legitimate calculation can land anywhere in that range too.",
+    "A non-numeric claim — a causal statement, a comparison, a "
+    "recommendation — with no number in it to extract and check at all.",
+)
+
+
+def capability_summary() -> dict[str, list[str]]:
+    """What this validator does and does not check, as plain statements.
+
+    Exists so a caller (the API, the UI, the docs) quotes this boundary
+    verbatim instead of re-describing it from memory somewhere else.
+    """
+    return {
+        "verifies": list(VERIFIED_CLAIM_TYPES),
+        "does_not_verify": list(KNOWN_BLIND_SPOTS),
+    }
+
+
 # Relative tolerance when matching a claimed number to a computed fact. The
 # model rounds ("about 4,200"), so exact equality would flag correct answers.
 _REL_TOLERANCE = 0.02
