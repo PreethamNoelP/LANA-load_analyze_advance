@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.config import config
 from app.llm import get_provider
 from app.llm.context import build_context
-from app.llm.validation import validate_answer
+from app.llm.validation import capability_summary, validate_answer
 from app.llm.ollama_provider import OllamaProvider
 from app.analysis.statistics import (
     analyze_correlations,
@@ -397,6 +397,16 @@ def query_stream(req: QueryReq):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/validator/capabilities")
+def validator_capabilities():
+    """What the answer-validation layer does and does not check, in plain terms.
+
+    Sourced from app.llm.validation directly, not restated here, so this
+    endpoint and the code that actually enforces it cannot drift apart.
+    """
+    return capability_summary()
 
 
 @app.get("/stats/{session_id}")
