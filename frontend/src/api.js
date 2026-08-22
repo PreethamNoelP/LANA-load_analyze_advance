@@ -93,6 +93,10 @@ export async function getModels() {
   return ok(await fetch(`${BASE}/models`))
 }
 
+export async function getValidatorCapabilities() {
+  return ok(await fetch(`${BASE}/validator/capabilities`))
+}
+
 export function exportCsvUrl(sessionId)  { return `${BASE}/export/csv/${sessionId}` }
 export function exportPdfUrl(sessionId)  { return `${BASE}/export/pdf/${sessionId}` }
 export function exportDocxUrl(sessionId) { return `${BASE}/export/docx/${sessionId}` }
