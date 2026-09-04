@@ -16,7 +16,7 @@ LANA is a **local-first AI data analysis platform** — upload any dataset, clea
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4+-F7931E?style=flat-square&logo=scikit-learn&logoColor=white)](https://scikit-learn.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-[**Quick Start**](#️-installation--setup) · [**Architecture**](#️-architecture--system-design) · [**Report a Bug**](https://github.com/PreethamNoelP/LANA-load_analyze_advance/issues)
+[**Quick Start**](#️-installation--setup) · [**Architecture**](#️-architecture--system-design) · [**Engineering Log**](docs/engineering-changelog.md) · [**Report a Bug**](https://github.com/PreethamNoelP/LANA-load_analyze_advance/issues)
 
 </div>
 
@@ -70,15 +70,16 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 
 | Feature | Description |
 |---|---|
-| 🗂️ **Multi-format Upload** | Drag-and-drop CSV, Excel (`.xlsx`/`.xls`), and JSON. Instant schema detection. |
-| 🧹 **Data Cleaning** | Auto-detect duplicates, missing values, outliers, and text inconsistencies. Preview changes before applying. Toggle between original and cleaned views. |
-| 🤖 **Natural Language Queries** | Ask plain-English questions. LANA builds structured context from your dataset and queries a local LLM. |
-| 📊 **9 Chart Types** | Histogram, Line, Bar, Scatter, Box, Heatmap, Violin, Pie, Area — rendered server-side as crisp PNGs. |
-| 📐 **Descriptive Statistics** | Count, mean, median, std, variance, IQR, skewness, kurtosis, and more — per column. |
-| 📉 **Linear Regression** | OLS regression with R² score, coefficient, RMSE, and a plain-English model interpretation. |
-| 📄 **One-click Export** | Download as CSV, or generate a full PDF or DOCX report with dataset context included. |
+| 🗂️ **Multi-format Upload** | Streamed, memory-bounded upload of CSV, Excel (`.xlsx`/`.xls`), and JSON. Instant schema detection, plus a bundled sample dataset if you don't have a file handy. |
+| 🧹 **Explainable Data Cleaning** | Auto-detect duplicates, missing values (two independent outlier rules — IQR and MAD), and text inconsistencies. Every suggested fix carries its statistical reasoning, nothing destructive runs by default, and every change is recorded in a step-by-step, reversible-or-not transformation log. |
+| 🤖 **Grounded, Validated Answers** | Every question is answered from a structured fact ledger LANA computes from your data, never from raw rows or the model's own recall. Every numeric claim in the answer is then checked against that ledger and flagged as verified, derived, or unsupported — with an in-app panel stating exactly what that check does and doesn't catch. |
+| 📊 **9 Chart Types** | Histogram, Line, Bar, Scatter, Box, Heatmap, Violin, Pie, Area — rendered server-side as crisp PNGs. Large datasets are drawn from a fixed, disclosed sample rather than silently getting slower. |
+| 📐 **Rigorous Statistics** | 15+ metrics per column (mean, median, std, IQR, skew, kurtosis…) with 95% confidence intervals; correlation scans corrected for multiple testing (Benjamini-Hochberg FDR) so "significant" isn't just a raw p-value. |
+| 📉 **Linear Regression** | OLS with R², coefficient CI95, and diagnostics — heteroscedasticity, residual normality, high-leverage points — plus a plain-English interpretation. |
+| 📄 **One-click Export** | Download as CSV (streamed, bounded memory even on very large exports), or generate a PDF/DOCX report that includes the cleaning provenance and quality caveats behind the numbers, not just the numbers. |
+| ⚙️ **Adapts to Your Machine** | Upload and session-memory limits are derived from the host's actual RAM at startup, not a flat constant — the same build works on an 8 GB laptop and a 64 GB workstation. Check what it chose at `GET /health`. |
 | 🔒 **100% Local & Private** | No cloud API. No telemetry. No data leaves your machine. |
-| 🎨 **Production UI** | Dark-theme React SPA with a ChatGPT-style chat interface and sticky navigation. |
+| 🎨 **Production UI** | Dark-theme React SPA with a ChatGPT-style chat interface, sessions that survive a page refresh, and confirmation before anything destructive. |
 | 🔌 **Pluggable LLM Backend** | Swap between Ollama and any OpenAI-compatible endpoint (Groq, LM Studio, Together.ai) via `.env`. |
 
 ---
@@ -90,6 +91,7 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 │                      Browser  (React 18 + Vite)                       │
 │                                                                       │
 │  Landing → Upload → [Ask AI | Clean | Visualize | Analyze | Export]  │
+│    (session id persisted in sessionStorage — survives a refresh)     │
 │                              ↕  fetch /api/*                          │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │  Vite dev proxy  :5173 → :8000
@@ -97,26 +99,35 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 ┌──────────────────────────────────────────────────────────────────────┐
 │                     FastAPI  (Uvicorn ASGI)                            │
 │                                                                       │
-│  POST /upload          →  pandas.read_csv/excel/json                  │
-│                        →  SessionStore[uuid] = Session(raw, cleaned)  │
-│                        →  profile_dataframe() + quality score         │
+│  GET  /health          →  host RAM/CPU + derived limits + LLM status  │
 │                                                                       │
-│  GET  /profile         →  per-column kind, shape, caveats             │
+│  POST /upload          →  ingest.spool_upload() (streamed, no 3x copy)│
+│                        →  admission check against host-derived budget │
+│                        →  optimize_dtypes() (lossless) → Session      │
+│                                                                       │
+│  GET  /profile         →  Session.profiles() (cached per version)     │
 │  GET  /lineage         →  transformation log: raw → active version    │
+│  GET  /recommendations →  charts/analyses this dataset's shape suits  │
 │                                                                       │
 │  GET  /clean/preview   →  detect_issues(df)  → JSON + reasoning       │
 │  POST /clean/apply     →  apply_cleaning(df, ops) → (df, ledger)      │
 │  POST /clean/version   →  switch active view (original/cleaned)       │
+│  GET  /clean/status    →  which version is active, and how it got there│
 │                                                                       │
-│  POST /query           →  build_context(df) → facts + prompt          │
+│  POST /query(/stream)  →  Session.context() → build_context()         │
+│                        →  facts + bounded prompt (LIMITS disclosed)   │
 │                        →  LLMProvider.answer_question()               │
-│                        →  validate_answer(answer, facts)              │
+│                        →  validate_answer() → verified/derived/       │
+│                           unsupported, per numeric claim              │
+│  GET  /validator/capabilities → what that check does and doesn't catch│
 │                                                                       │
-│  POST /chart           →  create_chart(df, type, col) → PNG bytes    │
+│  POST /chart           →  create_chart(df, type, col) → PNG bytes     │
+│                           (sampled + disclosed above the plot limit)  │
 │  GET  /stats           →  compute_statistics(series)  → JSON + CI95   │
-│  GET  /correlation     →  compute_correlations() + BH q-values        │
+│  GET  /correlation     →  compute_correlations() + BH q-values         │
 │  POST /regression      →  perform_linear_regression() → JSON + CI     │
-│  GET  /export/*        →  generate_pdf / generate_word / df.to_csv() │
+│                           + heteroscedasticity/normality diagnostics  │
+│  GET  /export/*        →  generate_pdf / generate_word / streamed csv│
 └──────────┬───────────────────────────┬───────────────────────────────┘
            │                           │
            ↓                           ↓
@@ -124,9 +135,10 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 │   app/llm/      │        │  app/analysis/            │
 │                 │        │  app/data/                │
 │  OllamaProvider │        │  app/visualization/       │
-│  OpenAICompat   │        │  app/export/              │
-│  Provider       │        │                           │
-│  (ABC pattern)  │        │  pandas · scikit-learn    │
+│  OpenAICompat   │        │  app/export/               │
+│  Provider       │        │  app/resources/            │
+│  (ABC pattern)  │        │                           │
+│                 │        │  pandas · scikit-learn    │
 │                 │        │  seaborn · fpdf · docx    │
 └──────┬──────────┘        └──────────────────────────┘
        │
@@ -143,11 +155,11 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 
 **Key design decisions:**
 
-- **In-memory session store** (`dict[uuid, DataFrame]`) — zero-latency reads, zero dependencies, right for local single-user use.
-- **Dual-session design** — `_sessions` holds the original DataFrame; `_cleaned_sessions` holds the cleaned version. `_session()` transparently returns whichever is active, so all downstream endpoints work without changes.
-- **Server-side chart rendering** — matplotlib/seaborn runs on the backend; the frontend receives PNG bytes. No JavaScript charting library, consistent quality.
+- **In-memory session store, one object per session** — a `Session` holds the raw DataFrame, an optional cleaned one, and a per-version cache of its column profile and grounded LLM context (both are expensive to recompute and identical for the life of that version). `.active` transparently returns whichever version is active, so downstream endpoints don't know or care whether cleaning happened.
+- **Host-adaptive resource limits** — upload size and total session memory are derived from the machine's actual RAM at startup (`app/resources.py`), not a flat constant, with a live free-memory check at admission time as a second gate. An explicit `.env` value always overrides the probe.
+- **Grounded, then validated** — `build_context()` computes a fact ledger (column stats, category breakdowns, group averages, FDR-corrected correlations) from the data *before* the question is even read, bounds it to the model's context window, and states what it had to omit. `validate_answer()` then checks every number the model produced against that same ledger and shows the verdict — not a black-box "trust me," a documented, code-referenced trace (see `docs/provenance.md`).
+- **Server-side chart rendering** — matplotlib/seaborn runs on the backend; the frontend receives PNG bytes. No JavaScript charting library, consistent quality, and a chart drawn from a sample says so directly on the image.
 - **LLMProvider ABC** — a pluggable interface makes swapping local ↔ cloud LLMs a single `.env` change.
-- **Structured LLM context** — `generate_context()` builds a rich text summary (column types, null rates, sample rows, stats ranges) before every query, dramatically improving answer grounding.
 - **Vite proxy** — `/api/*` is proxied at the dev-server level, keeping the same configuration valid behind nginx in production.
 
 ---
@@ -188,10 +200,14 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 
 **Step 1 — Upload**
 ```
-User drops CSV/Excel/JSON
-→ FastAPI parses with pandas
+User drops CSV/Excel/JSON (or clicks "Try with sample data")
+→ Body streams into a spooled temp file — never fully buffered in RAM
+→ For CSV: cost is projected from a sample and checked against this
+  machine's derived memory budget before the full parse runs
+→ FastAPI parses with pandas, then losslessly shrinks the frame
+  (int downcasting, low-cardinality strings → categoricals)
 → DataFrame stored in-memory under a UUID session key
-→ Frontend receives: rows, columns, numeric_columns, 8-row preview
+→ Frontend receives: rows, columns, numeric_columns, 8-row preview, quality
 ```
 
 **Step 2 — Data Cleaning (optional)**
@@ -212,22 +228,27 @@ All downstream tabs (Ask AI, Visualize, Analyze, Export) use whichever
 version is active. The original is always preserved and switchable.
 ```
 
-**Step 3 — Context Generation**
+**Step 3 — Grounded Context, Built Before the Question Is Read**
 ```
-Every AI query triggers generate_context(df):
-→ Column names + inferred dtypes
-→ Null counts, unique value counts per column
-→ Statistical summary (mean, std, min, max for numeric columns)
-→ First 3 sample rows as text
-This context is prepended to the user's question before the LLM call.
+Every AI query triggers build_context(df):
+→ Per-column facts (type, nulls, mean/median/std, IQR, skew) — no raw rows
+→ Exact category breakdowns and group-by averages
+→ Correlations, corrected for multiple testing (BH FDR)
+→ Cleaning lineage, if the active version was cleaned
+→ Bounded to the model's context window; anything dropped is stated,
+  not silently truncated
+Every fact is also kept in a parallel ledger for step 5 to check against.
 ```
 
-**Step 4 — LLM Query**
+**Step 4 — LLM Query, Then Checked Against What Was Computed**
 ```
-User question + structured context → Ollama (local inference)
-→ Model reads the dataset summary, understands shape and content
-→ Returns a grounded, dataset-specific answer
-→ No hallucination about columns that don't exist
+Question + grounded context → Ollama (local inference)
+→ Model answers using only the facts it was shown
+→ validate_answer() extracts every number in the answer and checks it
+  against the same fact ledger, within a 2% tolerance
+→ Each claim lands as verified / derived / unsupported
+→ Only unsupported claims and unresolved references surface a warning —
+  see docs/provenance.md for exactly what this does and doesn't catch
 ```
 
 **Step 5 — Visualization**
@@ -340,14 +361,17 @@ Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 
 ```
 1. Drop a CSV, Excel, or JSON file on the upload screen
-   → KPI tiles: row count, column count, numeric/text split
+   → No file handy? Click "Try with sample data" for an instant demo
+   → KPI tiles: row count, column count, numeric/text split, data quality
    → Toggle "Show preview" to inspect raw data
+   → Your session id is remembered — refreshing the page restores it
 
 2. Ask AI — ChatGPT-style interface
    → "What are the outliers in this column?"
    → "Which feature correlates most with execution time?"
-   → Click suggestion chips to start instantly
+   → Click suggestion chips, or a dataset-specific "suggested next step"
    → Messages survive tab switches — context is never lost
+   → Every answer states which figures it verified against the data
 
 3. Clean (optional, recommended before analysis)
    → Auto-scan detects duplicates, nulls, outliers, text inconsistencies
@@ -386,14 +410,16 @@ Restart the backend — no other changes required.
 
 | Metric | Value |
 |---|---|
-| Time to first AI insight | < 30s from upload |
-| Chart generation latency | ~1–2s (server-side render) |
+| Time to first AI insight | < 30s from upload (or instant, via the bundled sample dataset) |
+| Chart generation latency | ~1–2s (server-side render, sampled above 50k points) |
 | LLM response (phi3:mini, CPU) | ~3–8s |
+| Grounded answer accuracy, measured | 82.5% correct on a 40-question benchmark vs. 52.5% for an ungrounded baseline — same model, same questions (`eval/`, see `docs/engineering-changelog.md`) |
 | Supported input formats | CSV, Excel `.xlsx`/`.xls`, JSON |
-| Export formats | CSV, PDF, DOCX |
+| Export formats | CSV (streamed), PDF, DOCX — each carrying the cleaning provenance behind the numbers |
 | Chart types | 9 |
-| Statistical metrics per column | 15 |
-| Cleaning operations | Dedup, null fill, IQR outlier removal, text normalization |
+| Statistical metrics per column | 15+, with 95% confidence intervals |
+| Cleaning operations | Dedup, null fill, dual-rule outlier detection (IQR + MAD), winsorize, text normalization — every step logged and mostly reversible |
+| Backend test suite | 117 tests, run on every push (`pytest tests/ -q`) |
 | Data privacy | 100% — zero external network calls |
 
 ---
@@ -410,10 +436,16 @@ Started with D3.js. Switched to backend matplotlib/seaborn — eliminated a larg
 A ChatGPT-style fixed-input / scrollable-thread layout inside nested flex containers silently breaks scroll without `minHeight: 0` on intermediate containers — a non-obvious CSS rule that's easy to miss.
 
 **LLM context quality**
-Feeding raw DataFrame strings to the LLM produced unreliable answers. Structured context generation (`generate_context()`) — column types, null rates, sample rows, stat ranges — dramatically improved grounding and reduced hallucination.
+Feeding raw DataFrame strings to the LLM produced unreliable answers. Structured context generation — column types, null rates, category breakdowns, stat ranges — dramatically improved grounding and reduced hallucination. This first pass (`generate_context()`, still used for export reports) has since been complemented by `build_context()` plus `validate_answer()` for the Q&A path specifically, which checks the model's own numbers against what was actually computed rather than trusting that better context alone is enough — see the entry below.
 
 **Non-destructive data cleaning**
-Storing a separate cleaned DataFrame alongside the original (rather than mutating in place) lets users toggle between versions at any point. The key insight: `_session()` acts as a transparent router — all existing endpoints get the right version without knowing about cleaning at all.
+Storing a separate cleaned DataFrame alongside the original (rather than mutating in place) lets users toggle between versions at any point. The key insight: `Session.active` acts as a transparent router — all existing endpoints get the right version without knowing about cleaning at all.
+
+**"Grounded" isn't the same as "verified" — measure the gap, don't assume it**
+A structured fact ledger prepended to every prompt reduces hallucination, but it doesn't prove an answer is correct on its own. Built a small offline eval harness (`eval/`) that generates seeded synthetic datasets, resolves ground truth from LANA's own statistics functions, and runs 40 labeled questions against a real local model under two conditions (grounded vs. a naive baseline). First run: grounded answers scored *worse* than the baseline on trivial questions — the model was pattern-matching a single refusal example in the system prompt almost verbatim, regardless of whether the fact was actually present. Fixed by rewording the prompt's final instruction to model search-then-answer instead of licensing refusal as the default (full account in `docs/engineering-changelog.md`). Full-suite result after the fix: 82.5% correct vs. 52.5% for the baseline — and the eval run itself surfaced a genuine remaining blind spot (a number correctly matched to the wrong column/label), which is now documented rather than hidden, both in `docs/provenance.md` and in a collapsible panel in the Ask AI UI.
+
+**A memory budget has to be a policy, not a live reading**
+Sizing the upload/session limits from *available* RAM at request time made the same file's admission decision swing by several times depending on how many browser tabs happened to be open when the process started — non-deterministic in a way a user could neither see nor predict. Fixed by deriving the budget from *total* RAM once at startup (a stable policy) and using a separate, live free-memory check only as a second gate against a genuinely busy machine at admission time — not as the basis for the budget itself.
 
 ---
 
