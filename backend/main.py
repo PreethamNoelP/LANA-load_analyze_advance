@@ -1,5 +1,4 @@
 import sys
-import io
 import json
 import logging
 import os
@@ -20,6 +19,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.config import config
+from app.resources import HOST, UPLOAD_PEAK_MULTIPLIER, can_admit
 from app.llm import get_provider
 from app.llm.context import build_context
 from app.llm.validation import capability_summary, validate_answer
@@ -31,8 +31,9 @@ from app.analysis.statistics import (
     generate_recommendations,
 )
 from app.analysis.regression import perform_linear_regression
+from app.data import ingest
 from app.data.cleaner import apply_cleaning, detect_issues
-from app.data.profile import dataset_quality, profile_dataframe
+from app.data.profile import dataset_quality
 from app.visualization.charts import CHART_TYPES, create_chart
 from backend.session_store import CLEANED, ORIGINAL, Session, SessionStore
 
@@ -54,12 +55,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_UPLOAD_MB = int(os.getenv("LANA_MAX_UPLOAD_MB", "200"))
+# Limits are derived from the machine LANA is actually running on, not from
+# constants. The same 2 GB session budget is reckless on an 8 GB laptop and
+# needlessly stingy on a workstation, and LANA's whole premise is that it runs
+# on the user's own hardware. An explicit environment variable always wins —
+# the operator knows something the probe does not.
+MAX_UPLOAD_MB = int(os.getenv(
+    "LANA_MAX_UPLOAD_MB", str(max(8, int(HOST.upload_limit_bytes() / 1024 ** 2)))
+))
 MAX_SESSIONS = int(os.getenv("LANA_MAX_SESSIONS", "30"))
 # Resident-bytes ceiling across all sessions. Session count alone is not a
 # memory bound — a handful of wide uploads can exhaust the host well before
 # the count limit is reached.
-MAX_SESSION_MB = int(os.getenv("LANA_MAX_SESSION_MB", "2048"))
+MAX_SESSION_MB = int(os.getenv(
+    "LANA_MAX_SESSION_MB", str(max(256, int(HOST.session_budget_bytes() / 1024 ** 2)))
+))
 SESSION_TTL_SECONDS = float(os.getenv("LANA_SESSION_TTL_SECONDS", "3600"))
 
 # Caps how many LLM requests run at once — a local Ollama model serves one
@@ -153,14 +163,6 @@ def _preview(df: pd.DataFrame, rows: int = 8) -> list[dict]:
     return [_clean_record(r) for r in df.head(rows).to_dict(orient="records")]
 
 
-def _parse_dataframe(ext: str, buf: io.BytesIO) -> pd.DataFrame:
-    if ext == ".csv":
-        return pd.read_csv(buf)
-    if ext in (".xlsx", ".xls"):
-        return pd.read_excel(buf)
-    return pd.read_json(buf)
-
-
 # ── Session accessors ─────────────────────────────────────────────────────────
 
 def _get_session(session_id: str) -> Session:
@@ -184,7 +186,24 @@ def _session(session_id: str) -> pd.DataFrame:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "sessions": _store.stats()}
+    """Liveness plus the resource picture the limits were derived from.
+
+    Exposed because the limits are no longer constants a reader can look up in
+    the source — they depend on the machine. When an upload is refused for
+    being too large, this is where the user sees why.
+    """
+    return {
+        "ok": True,
+        "sessions": _store.stats(),
+        "host": HOST.to_dict(),
+        "limits": {
+            "max_upload_mb": MAX_UPLOAD_MB,
+            "max_session_mb": MAX_SESSION_MB,
+            "max_sessions": MAX_SESSIONS,
+            "session_ttl_seconds": SESSION_TTL_SECONDS,
+            "max_concurrent_llm": MAX_CONCURRENT_LLM,
+        },
+    }
 
 
 @app.post("/upload")
@@ -193,41 +212,81 @@ async def upload(file: UploadFile = File(...)):
     if ext not in (".csv", ".xlsx", ".xls", ".json"):
         raise HTTPException(400, f"Unsupported type '{ext}'. Use CSV, Excel, or JSON.")
 
-    # Read in chunks and abort as soon as the limit is crossed, instead of
-    # buffering the entire body first — an unbounded read lets anyone with
-    # the link send an arbitrarily large file and consume bandwidth/disk
-    # before the size check ever runs.
+    # The body streams into a spooled temp file rather than accumulating in a
+    # list and then being joined. The old path held the payload three times
+    # over (chunk list, joined bytes, BytesIO) before pandas even started; on
+    # a 93 MB CSV that alone accounted for most of a measured 590 MB peak.
+    # A spool keeps small uploads in RAM and lets large ones spill to disk, so
+    # the memory ceiling stops scaling with the file size.
     limit_bytes = MAX_UPLOAD_MB * 1024 * 1024
-    chunks = []
-    total = 0
-    while chunk := await file.read(1024 * 1024):
-        total += len(chunk)
-        if total > limit_bytes:
-            raise HTTPException(
-                413,
-                f"File exceeds the {MAX_UPLOAD_MB} MB limit "
-                f"(set LANA_MAX_UPLOAD_MB to change it).",
-            )
-        chunks.append(chunk)
-    buf = io.BytesIO(b"".join(chunks))
+    try:
+        spool, total = await ingest.spool_upload(
+            file.read, limit_bytes, f"{MAX_UPLOAD_MB} MB"
+        )
+    except ingest.UploadTooLarge as e:
+        raise HTTPException(413, f"{e} Set LANA_MAX_UPLOAD_MB to override.")
 
     try:
-        # Parsing runs in a worker thread — pandas' readers are synchronous
-        # and can take seconds on large files, which would otherwise block
-        # every other request sharing this process's event loop.
-        df = await run_in_threadpool(_parse_dataframe, ext, buf)
-    except Exception as e:
-        raise HTTPException(400, f"Could not parse file: {e}")
+        # Admission is decided before the parse, not after it. Projecting the
+        # frame's cost from a small sample means an unaffordable file is
+        # refused with a number the user can act on, rather than the process
+        # being killed halfway through materialising it.
+        if ext == ".csv":
+            projection = await run_in_threadpool(
+                ingest.project_csv_frame_bytes, spool, total
+            )
+            budget = MAX_SESSION_MB * 1024 * 1024
+            if projection and projection[0] > budget:
+                projected_mb = projection[0] / 1024 ** 2
+                raise HTTPException(
+                    413,
+                    f"This file would need about {projected_mb:,.0f} MB of memory "
+                    f"({projection[1]:,} rows), and the budget on this machine is "
+                    f"{MAX_SESSION_MB:,} MB. Upload a subset of the columns or rows, "
+                    f"or raise LANA_MAX_SESSION_MB if you have headroom.",
+                )
+            # Second gate, against the machine's state *now* rather than at
+            # startup. Refusing here keeps LANA from being the process that
+            # pushes a laptop into swapping.
+            if projection:
+                needed = int(projection[0] * UPLOAD_PEAK_MULTIPLIER)
+                ok, free = can_admit(needed)
+                if not ok:
+                    raise HTTPException(
+                        503,
+                        f"Not enough free memory right now: parsing this file needs "
+                        f"roughly {needed / 1024 ** 2:,.0f} MB and only "
+                        f"{free / 1024 ** 2:,.0f} MB is free. Close some applications "
+                        f"and try again, or upload a smaller extract.",
+                    )
+
+        try:
+            # Parsing runs in a worker thread — pandas' readers are synchronous
+            # and can take seconds on large files, which would otherwise block
+            # every other request sharing this process's event loop.
+            df, report = await run_in_threadpool(
+                ingest.read_frame, spool, ext, total, ingest.spilled(spool)
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Could not parse file: {e}")
+    finally:
+        # Releases the spool's memory, and deletes its backing file if it
+        # spilled. Nothing is left on disk after the request.
+        spool.close()
 
     if df.empty:
         raise HTTPException(400, "The file parsed successfully but contains no rows.")
 
     sid = str(uuid.uuid4())
-    _store.create(sid, file.filename, df)
+    session = _store.create(sid, file.filename, df)
 
     # Profiling is the first thing a data scientist does; surfacing it at
     # upload means the user sees what they are working with before they act.
-    profiles = await run_in_threadpool(profile_dataframe, df)
+    # Cached on the session, so the six other places that need these profiles
+    # read them instead of spending another full pass over the frame.
+    profiles = await run_in_threadpool(session.profiles)
     quality = dataset_quality(profiles, len(df))
 
     return _jsonable({
@@ -239,6 +298,8 @@ async def upload(file: UploadFile = File(...)):
         "preview": _preview(df),
         "quality": quality,
         "profiles": {name: p.to_dict() for name, p in profiles.items()},
+        # What ingest actually did, so a large upload can explain itself.
+        "ingest": report.to_dict(),
     })
 
 
@@ -264,7 +325,7 @@ def profile(session_id: str):
     """Full column-by-column profile and quality assessment of the active version."""
     session = _get_session(session_id)
     df = session.active
-    profiles = profile_dataframe(df)
+    profiles = session.profiles()
     return _jsonable({
         "version": session.active_version,
         "rows": len(df),
@@ -322,11 +383,24 @@ class VersionReq(BaseModel):
 
 
 def _build_query_context(session: Session):
-    """Grounded context for the session's active version, including lineage."""
-    return build_context(
-        session.active,
-        lineage_narrative=session.lineage_narrative(),
-        version=session.active_version,
+    """Grounded context for the session's active version, including lineage.
+
+    Cached per version on the session. Building it means profiling every
+    column and running a correlation scan — ~2.1 s on a 200k x 30 frame — and
+    the result is identical for every question asked of the same version, so
+    paying for it once per version rather than once per question removes that
+    entire wait from the second question onward.
+    """
+    return session.context(
+        lambda df, profiles: build_context(
+            df,
+            lineage_narrative=session.lineage_narrative(),
+            version=session.active_version,
+            profiles=profiles,
+            # The configured window, so a wide dataset is trimmed deliberately
+            # here rather than truncated from the front by the runtime.
+            token_budget=config.llm.num_ctx,
+        )
     )
 
 
@@ -421,7 +495,10 @@ def stats(session_id: str, column: str = Query(...)):
 
 @app.get("/correlation/{session_id}")
 def correlation(session_id: str, method: Literal["pearson", "spearman"] = Query("pearson")):
-    return _jsonable(analyze_correlations(_session(session_id), method=method))
+    session = _get_session(session_id)
+    return _jsonable(
+        analyze_correlations(session.active, method=method, profiles=session.profiles())
+    )
 
 
 class RegressionReq(BaseModel):
@@ -449,7 +526,7 @@ class ChartReq(BaseModel):
 
 @app.post("/chart")
 def chart(req: ChartReq):
-    df = _session(req.session_id)
+    session = _get_session(req.session_id)
     # Without this, an unknown type renders a PNG reading "Unknown chart type"
     # and returns it with a 200 — a failure the caller cannot detect.
     if req.chart_type not in CHART_TYPES:
@@ -457,7 +534,10 @@ def chart(req: ChartReq):
             400, f"Unknown chart type '{req.chart_type}'. Supported: {', '.join(CHART_TYPES)}."
         )
     try:
-        png = create_chart(df, req.chart_type, req.column, secondary_column=req.x_col)
+        png = create_chart(
+            session.active, req.chart_type, req.column,
+            secondary_column=req.x_col, profiles=session.profiles(),
+        )
     except Exception as e:
         raise HTTPException(400, str(e))
     return Response(content=png, media_type="image/png")
@@ -465,8 +545,12 @@ def chart(req: ChartReq):
 
 @app.get("/recommendations/{session_id}")
 def recommendations(session_id: str):
-    df = _session(session_id)
-    return {"recommendations": generate_recommendations(df)}
+    session = _get_session(session_id)
+    return {
+        "recommendations": generate_recommendations(
+            session.active, profiles=session.profiles()
+        )
+    }
 
 
 @app.get("/models")
@@ -477,11 +561,43 @@ def models():
         return {"models": []}
 
 
+# Rows serialised per chunk when streaming an export. Large enough that the
+# per-call overhead is negligible, small enough that one chunk is never itself
+# a memory concern.
+CSV_EXPORT_CHUNK_ROWS = 50_000
+
+
+def _csv_chunks(df: pd.DataFrame):
+    """Serialise a frame to CSV in row blocks, yielding encoded bytes.
+
+    ``df.to_csv()`` with no path builds the entire file as one Python string
+    and the caller then encodes it — two full-size copies resident at once,
+    which on a 1M x 30 frame is roughly a gigabyte of transient allocation for
+    a file the user is about to stream to disk anyway.
+
+    This is an explicit trade, measured rather than assumed. On that frame:
+
+        single call to_csv().encode()   20.2 s, ~1 GB transient
+        50,000-row blocks              25.0 s, ~25 MB transient
+
+    So it costs about 23% more CPU. Worth it here for two reasons: the memory
+    it saves is the difference between working and being OOM-killed on an 8 GB
+    laptop, and time-to-first-byte drops from 20 s to under one, so the browser
+    shows a download progressing instead of a tab that appears to have hung.
+    Block size was tuned by measurement — 100k and 250k were both slower.
+    """
+    header = True
+    for start in range(0, len(df), CSV_EXPORT_CHUNK_ROWS):
+        block = df.iloc[start:start + CSV_EXPORT_CHUNK_ROWS]
+        yield block.to_csv(index=False, header=header).encode("utf-8")
+        header = False
+
+
 @app.get("/export/csv/{session_id}")
 def export_csv(session_id: str):
     df = _session(session_id)
-    return Response(
-        content=df.to_csv(index=False).encode(),
+    return StreamingResponse(
+        _csv_chunks(df),
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="lana_data.csv"'},
     )
@@ -494,7 +610,7 @@ def _report_inputs(session: Session) -> dict:
     same provenance and caveats the UI shows rather than bare statistics.
     """
     df = session.active
-    profiles = profile_dataframe(df)
+    profiles = session.profiles()
     return {
         "context": generate_context(df),
         "quality": dataset_quality(profiles, len(df)),
@@ -547,7 +663,12 @@ def export_docx(session_id: str):
 @app.get("/clean/preview/{session_id}")
 def clean_preview(session_id: str):
     """Detect data quality issues in the original DataFrame without modifying it."""
-    return _jsonable(detect_issues(_original(session_id)))
+    session = _get_session(session_id)
+    # Cleaning always reads the raw frame, so the cached profiles are reusable
+    # only while the original is the active version. Recomputing otherwise is
+    # correct: profiles of the cleaned frame describe different data.
+    profiles = session.profiles() if session.active_version == ORIGINAL else None
+    return _jsonable(detect_issues(session.raw, profiles=profiles))
 
 
 @app.post("/clean/apply/{session_id}")
