@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { getCleanPreview, applyClean, switchVersion } from '../api.js'
+import { getCleanPreview, applyClean, switchVersion, getCleanStatus } from '../api.js'
+import ConfirmDialog from './ConfirmDialog.jsx'
 
 /* ── Small shared primitives ─────────────────────────────────────────────── */
 
@@ -294,7 +295,7 @@ function SchemaSection({ columnTypes, ops, onOpsChange }) {
 
 /* ── Quality Score ───────────────────────────────────────────────────────── */
 
-const GRADE_COLORS = {
+export const GRADE_COLORS = {
   excellent: 'var(--green)', good: 'var(--green)',
   fair: 'var(--amber)', poor: 'var(--red)',
 }
@@ -450,6 +451,18 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
   const [error,    setError]    = useState(null)
   const [applying, setApplying] = useState(false)
   const [result,   setResult]   = useState(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  // Populated from /clean/status on load when a cleaned version already
+  // existed before this component mounted (e.g. a session restored after a
+  // page refresh) — `result` only ever comes from a fresh Apply in this tab.
+  const [restoredLineage, setRestoredLineage] = useState(null)
+
+  useEffect(() => {
+    if (!session || !hasCleanedData) { setRestoredLineage(null); return }
+    getCleanStatus(session.session_id)
+      .then(data => setRestoredLineage(data.lineage || null))
+      .catch(() => {})
+  }, [session?.session_id, hasCleanedData])
 
   // Operation selections
   const [removeDupes,  setRemoveDupes]  = useState(false)
@@ -571,6 +584,29 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
     }
   }
 
+  // Row-deleting operations lose data outright, unlike a fill or a flag,
+  // which is why Apply otherwise runs with no gate at all — cleaning is
+  // non-destructive by default (outliers default to 'skip', not 'remove'),
+  // so a confirmation only earns its place when something irreversible is
+  // actually about to happen.
+  function destructiveSummary() {
+    const parts = []
+    if (removeDupes) parts.push(`remove ${issues.duplicates.count} duplicate row(s)`)
+    const droppedCols = Object.entries(nullOps).filter(([, m]) => m === 'drop').map(([c]) => c)
+    if (droppedCols.length) parts.push(`drop rows missing ${droppedCols.join(', ')}`)
+    const removedCols = Object.entries(outlierOps).filter(([, m]) => m === 'remove').map(([c]) => c)
+    if (removedCols.length) parts.push(`delete outlier rows in ${removedCols.join(', ')}`)
+    return parts
+  }
+
+  function handleApplyClick() {
+    if (destructiveSummary().length > 0) {
+      setConfirmOpen(true)
+    } else {
+      handleApply()
+    }
+  }
+
   async function handleVersionSwitch(v) {
     try {
       await switchVersion(session.session_id, v)
@@ -629,7 +665,9 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
       )}
 
       {/* Transformation log — the audit trail from raw upload to this version */}
-      {result?.lineage && <LineagePanel lineage={result.lineage} />}
+      {(result?.lineage || restoredLineage) && (
+        <LineagePanel lineage={result?.lineage || restoredLineage} />
+      )}
 
       {/* Quality assessment — what the data looks like before any action */}
       {!loading && issues?.quality && <QualityBanner quality={issues.quality} />}
@@ -705,7 +743,7 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
               : 'Select at least one operation above'}
           </span>
           <button
-            onClick={handleApply}
+            onClick={handleApplyClick}
             disabled={!hasOps || applying}
             style={{
               ...s.applyBtn,
@@ -717,6 +755,23 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
           </button>
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmOpen}
+        title="This will permanently remove data"
+        message={
+          <>
+            This cleaning step will {destructiveSummary().join('; ')}. Removed
+            rows are gone from the cleaned version — the original stays
+            switchable, but this specific data won't be in either view again
+            unless you re-run cleaning without it.
+          </>
+        }
+        confirmLabel="Apply anyway"
+        danger
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={() => { setConfirmOpen(false); handleApply() }}
+      />
     </div>
   )
 }
