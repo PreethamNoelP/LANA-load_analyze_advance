@@ -1,4 +1,42 @@
-export default function Sidebar({ session, onUploadNew }) {
+import { useState } from 'react'
+import ConfirmDialog from './ConfirmDialog.jsx'
+
+function StatusPill({ llmStatus }) {
+  // llmStatus is null while the first /health check is still in flight —
+  // shown as a neutral "checking" state rather than defaulting to either
+  // color, since claiming "connected" before actually asking was exactly
+  // the bug this replaces.
+  const checking = llmStatus == null
+  const up = llmStatus?.available === true
+  const color = checking ? 'var(--muted)' : up ? 'var(--green)' : 'var(--red)'
+  const bg = checking ? 'rgba(122,127,153,0.08)' : up ? 'rgba(78,199,127,0.08)' : 'rgba(224,82,82,0.08)'
+  const border = checking ? 'rgba(122,127,153,0.2)' : up ? 'rgba(78,199,127,0.2)' : 'rgba(224,82,82,0.2)'
+  const label = checking
+    ? 'Checking LLM…'
+    : up
+      ? (llmStatus.name || 'LLM connected')
+      : 'LLM unreachable'
+
+  return (
+    <div
+      title={up ? undefined : 'Check that Ollama is running and the configured model has been pulled.'}
+      style={{
+        padding: '10px 12px', background: bg, border: `1px solid ${border}`,
+        borderRadius: 8, fontSize: 12, color, display: 'flex', alignItems: 'center', gap: 8,
+      }}
+    >
+      <span style={{
+        width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+        background: color, boxShadow: checking ? 'none' : `0 0 6px ${color}`,
+      }} />
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+    </div>
+  )
+}
+
+export default function Sidebar({ session, llmStatus, onUploadNew }) {
+  const [confirmOpen, setConfirmOpen] = useState(false)
+
   return (
     <aside style={{
       position: 'fixed',
@@ -24,27 +62,9 @@ export default function Sidebar({ session, onUploadNew }) {
         <span style={{ fontWeight: 700, fontSize: 20, letterSpacing: '-0.03em' }}>LANA</span>
       </div>
 
-      {/* Ollama status */}
+      {/* LLM status */}
       <div style={{ padding: '16px 12px' }}>
-        <div style={{
-          padding: '10px 12px',
-          background: 'rgba(78,199,127,0.08)',
-          border: '1px solid rgba(78,199,127,0.2)',
-          borderRadius: 8,
-          fontSize: 12,
-          color: 'var(--green)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}>
-          <span style={{
-            width: 6, height: 6, borderRadius: '50%',
-            background: 'var(--green)',
-            boxShadow: '0 0 6px var(--green)',
-            flexShrink: 0,
-          }} />
-          Ollama connected
-        </div>
+        <StatusPill llmStatus={llmStatus} />
       </div>
 
       {/* Footer */}
@@ -70,7 +90,7 @@ export default function Sidebar({ session, onUploadNew }) {
           </div>
         )}
         <button
-          onClick={onUploadNew}
+          onClick={() => session ? setConfirmOpen(true) : onUploadNew()}
           style={{
             display: 'block',
             width: '100%',
@@ -88,6 +108,16 @@ export default function Sidebar({ session, onUploadNew }) {
           + New dataset
         </button>
       </div>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Start a new dataset?"
+        message="This clears the current dataset, chat history, and any cleaning you've done. It isn't recoverable from here — you'd need to re-upload the file."
+        confirmLabel="Start new"
+        danger
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={() => { setConfirmOpen(false); onUploadNew() }}
+      />
     </aside>
   )
 }
