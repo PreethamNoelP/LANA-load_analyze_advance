@@ -93,6 +93,16 @@ export async function getModels() {
   return ok(await fetch(`${BASE}/models`))
 }
 
+// Liveness, host resource limits, and — critically for the sidebar status
+// indicator — whether the configured LLM is actually reachable right now.
+export async function getHealth() {
+  return ok(await fetch(`${BASE}/health`))
+}
+
+export async function getRecommendations(sessionId) {
+  return ok(await fetch(`${BASE}/recommendations/${sessionId}`))
+}
+
 export async function getValidatorCapabilities() {
   return ok(await fetch(`${BASE}/validator/capabilities`))
 }
@@ -119,4 +129,8 @@ export async function switchVersion(sessionId, version) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ version }),
   }))
+}
+
+export async function getCleanStatus(sessionId) {
+  return ok(await fetch(`${BASE}/clean/status/${sessionId}`))
 }
