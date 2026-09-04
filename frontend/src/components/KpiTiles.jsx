@@ -1,8 +1,11 @@
+import { GRADE_COLORS } from './Clean.jsx'
+
 export default function KpiTiles({ session }) {
   if (!session) return null
 
   const numCols = session.numeric_columns || []
   const totalCols = session.columns?.length || 0
+  const quality = session.quality
 
   const tiles = [
     { label: 'Total Rows', value: session.rows?.toLocaleString(), color: 'var(--accent)' },
@@ -10,11 +13,21 @@ export default function KpiTiles({ session }) {
     { label: 'Numeric Cols', value: numCols.length, color: 'var(--amber)' },
     { label: 'Text Cols', value: totalCols - numCols.length, color: 'var(--muted)' },
   ]
+  // The quality score was already computed at upload — surfacing it here
+  // means a user sees it before ever opening the Clean tab, rather than it
+  // only existing inside a screen they might not visit.
+  if (quality) {
+    tiles.push({
+      label: 'Data Quality',
+      value: `${Math.round(quality.score)} · ${quality.grade}`,
+      color: GRADE_COLORS[quality.grade] || 'var(--muted)',
+    })
+  }
 
   return (
     <div style={{
       display: 'grid',
-      gridTemplateColumns: 'repeat(4, 1fr)',
+      gridTemplateColumns: `repeat(${tiles.length}, 1fr)`,
       gap: 12,
       marginBottom: 24,
     }}>
@@ -45,11 +58,12 @@ export default function KpiTiles({ session }) {
             {t.label}
           </div>
           <div style={{
-            fontSize: 28,
+            fontSize: t.label === 'Data Quality' ? 22 : 28,
             fontWeight: 700,
             fontFamily: 'var(--ff-mono)',
             color: t.color,
             letterSpacing: '-0.02em',
+            textTransform: t.label === 'Data Quality' ? 'capitalize' : 'none',
           }}>
             {t.value}
           </div>
