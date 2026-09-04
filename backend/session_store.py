@@ -21,6 +21,7 @@ from typing import Any
 import pandas as pd
 
 from app.data.lineage import CleaningLedger
+from app.data.profile import ColumnProfile, profile_dataframe
 
 ORIGINAL = "original"
 CLEANED = "cleaned"
@@ -55,6 +56,20 @@ class Session:
     _raw_bytes: int = 0
     _cleaned_bytes: int = 0
 
+    # Profiles are the most-recomputed thing in LANA. `profile_dataframe` was
+    # being called on the upload, again on /profile, again inside build_context
+    # for *every question*, again on /clean/preview, again inside
+    # analyze_correlations, again for the heatmap, and again on every export —
+    # roughly 0.7 s per call on a 200k x 30 frame, all of it recomputing an
+    # identical answer, because a stored frame never changes. Cleaning produces
+    # a *new* version rather than mutating one, so a profile is valid for the
+    # life of its version and is cached per version here.
+    _profiles: dict[str, dict[str, ColumnProfile]] = field(default_factory=dict)
+    # Same argument for the grounded LLM context, which is strictly more
+    # expensive (~2.1 s) because it profiles *and* runs a correlation scan.
+    _contexts: dict[str, Any] = field(default_factory=dict)
+    _cache_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
     def __post_init__(self) -> None:
         self._raw_bytes = _frame_bytes(self.raw)
 
@@ -77,6 +92,55 @@ class Session:
         self.ledger = ledger
         self.active_version = CLEANED
         self._cleaned_bytes = _frame_bytes(df)
+        # A re-clean replaces the cleaned frame, so anything derived from the
+        # previous one is stale. The original's entries stay valid — that frame
+        # was not touched.
+        with self._cache_lock:
+            self._profiles.pop(CLEANED, None)
+            self._contexts.pop(CLEANED, None)
+
+    # ── Derived-value cache ──────────────────────────────────────────────────
+
+    def profiles(self) -> dict[str, ColumnProfile]:
+        """Column profiles for the active version, computed at most once.
+
+        Callers that already hold this should pass it down rather than letting
+        a helper re-derive it; every function in ``app/`` that profiles a whole
+        frame accepts a ``profiles=`` argument for that reason.
+        """
+        version = self.active_version
+        with self._cache_lock:
+            cached = self._profiles.get(version)
+        if cached is not None:
+            return cached
+        # Computed outside the lock: profiling is seconds of CPU on a large
+        # frame, and holding the mutex through it would serialise every other
+        # request touching this session. A concurrent duplicate computation is
+        # wasteful but harmless, and both produce the same answer.
+        computed = profile_dataframe(self.active)
+        with self._cache_lock:
+            return self._profiles.setdefault(version, computed)
+
+    def context(self, build):
+        """Grounded LLM context for the active version, computed at most once.
+
+        ``build`` is a callable taking ``(df, profiles)``. Passed in rather
+        than imported so this module keeps depending only on the data layer.
+        """
+        version = self.active_version
+        with self._cache_lock:
+            cached = self._contexts.get(version)
+        if cached is not None:
+            return cached
+        computed = build(self.active, self.profiles())
+        with self._cache_lock:
+            return self._contexts.setdefault(version, computed)
+
+    def invalidate_cache(self) -> None:
+        """Drop every derived value. For callers that mutate a frame in place."""
+        with self._cache_lock:
+            self._profiles.clear()
+            self._contexts.clear()
 
     def set_version(self, version: str) -> None:
         if version not in (ORIGINAL, CLEANED):
@@ -153,8 +217,17 @@ class SessionStore:
             return {
                 "sessions": len(self._sessions),
                 "max_sessions": self.max_sessions,
-                "resident_mb": round(total / (1024 * 1024), 2),
-                "max_mb": round(self.max_bytes / (1024 * 1024), 2),
+                "frame_mb": round(total / (1024 * 1024), 2),
+                "max_frame_mb": round(self.max_bytes / (1024 * 1024), 2),
+                # Named explicitly because the distinction matters: this counts
+                # the bytes of the stored frames, which is what the budget
+                # governs. Process RSS is materially higher — the interpreter
+                # and its libraries are ~240 MB before any data, and each
+                # request adds working copies on top. A reader who takes
+                # `frame_mb` for total memory use will underestimate by several
+                # times, so the budget is derived with that headroom built in
+                # (see app/resources.py) rather than left to be inferred.
+                "measures": "stored frame bytes, not process RSS",
             }
 
     # ── Eviction ─────────────────────────────────────────────────────────────
