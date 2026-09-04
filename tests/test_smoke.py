@@ -252,6 +252,68 @@ def test_query_stream_rejects_unknown_session(client):
     assert client.post("/query/stream", json={"session_id": "nope", "question": "hi"}).status_code == 404
 
 
+# ── Health & models ───────────────────────────────────────────────────────────
+
+def test_health_reports_real_llm_availability(client, monkeypatch):
+    class _Up:
+        name = "Fake - test-model"
+        def is_available(self): return True
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _Up())
+    body = client.get("/health").json()
+    assert body["llm"] == {"available": True, "name": "Fake - test-model"}
+
+
+def test_health_reports_llm_unavailable_without_raising(client, monkeypatch):
+    class _Down:
+        name = "Fake - test-model"
+        def is_available(self): return False
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _Down())
+    body = client.get("/health").json()
+    assert body["ok"] is True
+    assert body["llm"]["available"] is False
+
+
+def test_health_survives_a_misconfigured_provider(client, monkeypatch):
+    # get_provider() raises ValueError for an unknown LLM_PROVIDER value.
+    # /health must still answer, not join the 500.
+    def _raise():
+        raise ValueError("Unknown LLM provider 'bogus'.")
+
+    monkeypatch.setattr(backend_main, "get_provider", _raise)
+    body = client.get("/health").json()
+    assert body["ok"] is True
+    assert body["llm"]["available"] is False
+
+
+def test_models_uses_the_configured_provider_not_a_hardcoded_ollama(client, monkeypatch):
+    class _OllamaLike:
+        def list_local_models(self): return ["phi3:mini", "llama3.1:8b"]
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _OllamaLike())
+    assert client.get("/models").json() == {"models": ["phi3:mini", "llama3.1:8b"]}
+
+
+def test_models_reports_the_configured_model_when_listing_is_unsupported(client, monkeypatch):
+    # openai_compat has no "what's pulled locally" concept. Regression: this
+    # endpoint used to hardcode OllamaProvider() regardless of the configured
+    # provider, silently returning [] for every openai_compat deployment.
+    class _OpenAICompatLike:
+        def is_available(self): return True
+
+    monkeypatch.setattr(backend_main, "get_provider", lambda: _OpenAICompatLike())
+    assert client.get("/models").json() == {"models": [backend_main.config.llm.model]}
+
+
+def test_models_falls_back_to_empty_on_any_failure(client, monkeypatch):
+    def _raise():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(backend_main, "get_provider", _raise)
+    assert client.get("/models").json() == {"models": []}
+
+
 def test_correlation_endpoint(client):
     sid = upload(client)["session_id"]
     r = client.get(f"/correlation/{sid}")

@@ -23,7 +23,6 @@ from app.resources import HOST, UPLOAD_PEAK_MULTIPLIER, can_admit
 from app.llm import get_provider
 from app.llm.context import build_context
 from app.llm.validation import capability_summary, validate_answer
-from app.llm.ollama_provider import OllamaProvider
 from app.analysis.statistics import (
     analyze_correlations,
     compute_statistics,
@@ -191,11 +190,22 @@ def health():
     Exposed because the limits are no longer constants a reader can look up in
     the source — they depend on the machine. When an upload is refused for
     being too large, this is where the user sees why.
+
+    Also the only place in the running app that proactively checks whether
+    the configured LLM is actually reachable, rather than waiting for a user
+    to ask a question and hit a 503. A misconfigured LLM_PROVIDER value is
+    caught here too, instead of surfacing as an unhandled error on first use.
     """
+    try:
+        provider = get_provider()
+        llm = {"available": provider.is_available(), "name": provider.name}
+    except Exception as e:
+        llm = {"available": False, "name": None, "error": _sanitize_llm_error(str(e))}
     return {
         "ok": True,
         "sessions": _store.stats(),
         "host": HOST.to_dict(),
+        "llm": llm,
         "limits": {
             "max_upload_mb": MAX_UPLOAD_MB,
             "max_session_mb": MAX_SESSION_MB,
@@ -555,8 +565,22 @@ def recommendations(session_id: str):
 
 @app.get("/models")
 def models():
+    """Locally-available models for the configured provider.
+
+    Only Ollama exposes a "what's pulled locally" listing; an
+    openai_compat endpoint has no equivalent concept, so this reports
+    the single model that provider is actually configured to use
+    instead of silently returning an empty list for a provider it was
+    never able to ask. Any failure (including a misconfigured
+    LLM_PROVIDER) falls back to an empty list rather than a 500 -
+    this is a convenience lookup, not a required call.
+    """
     try:
-        return {"models": OllamaProvider().list_local_models()}
+        provider = get_provider()
+        list_local = getattr(provider, "list_local_models", None)
+        if list_local is not None:
+            return {"models": list_local()}
+        return {"models": [config.llm.model] if provider.is_available() else []}
     except Exception:
         return {"models": []}
 
