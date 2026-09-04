@@ -9,8 +9,33 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Environment variables (contains secrets)
+# Environment variables (contains secrets). The trailing glob catches the
+# variants people actually create — .env.local, .env.production — while the
+# negation keeps the committed template.
 .env
+.env.*
+!.env.example
+
+# Personal study notes. Deliberately kept out of the published repository:
+# it is a private learning document, not project documentation.
+docs/*TEXTBOOK*.md
+
+# Editor/agent local state, which contains absolute paths from one machine.
+.claude/
+
+# Datasets. LANA is a data-analysis tool, so the normal way to test it is to
+# drop a real file in this directory — which makes `git add .` a one-keystroke
+# data leak. Input formats are ignored by default; the negations keep the
+# project's own JSON that happens to share an extension.
+*.csv
+*.xlsx
+*.xls
+*.parquet
+/*.json
+!package.json
+!package-lock.json
+!.env.example
+!frontend/public/sample-data/*.csv
 
 # Chat sessions
 chats/
