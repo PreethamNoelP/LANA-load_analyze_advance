@@ -21,6 +21,28 @@ export default function Upload({ onUpload }) {
     }
   }
 
+  // A first-time visitor needs their own file ready before they can see any
+  // value today. This fetches a bundled, realistic demo CSV (e-commerce
+  // orders with a genuine region effect and marketing-spend correlation —
+  // the same generator LANA's own eval harness uses) and runs it through the
+  // exact same upload path as a real file, so the demo is the real product.
+  async function handleSample() {
+    setError(null)
+    setLoading(true)
+    try {
+      const res = await fetch('/sample-data/retail_orders.csv')
+      if (!res.ok) throw new Error('Could not load the sample dataset.')
+      const blob = await res.blob()
+      const file = new File([blob], 'sample_retail_orders.csv', { type: 'text/csv' })
+      const data = await uploadFile(file)
+      onUpload(data)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
     <div style={{
       flex: 1,
@@ -160,6 +182,26 @@ export default function Upload({ onUpload }) {
           }}>{f}</span>
         ))}
       </div>
+
+      {/* No file handy? Run the exact same upload path on a bundled demo dataset. */}
+      <button
+        onClick={handleSample}
+        disabled={loading}
+        style={{
+          marginTop: 20,
+          fontSize: 13,
+          fontWeight: 600,
+          color: 'var(--accent2)',
+          background: 'transparent',
+          border: 'none',
+          cursor: loading ? 'default' : 'pointer',
+          textDecoration: 'underline',
+          textUnderlineOffset: 3,
+          opacity: loading ? 0.5 : 1,
+        }}
+      >
+        Don't have a file? Try with sample data →
+      </button>
 
       <style>{`@keyframes slide { 0%{transform:translateX(-100%)} 100%{transform:translateX(300%)} }`}</style>
     </div>
