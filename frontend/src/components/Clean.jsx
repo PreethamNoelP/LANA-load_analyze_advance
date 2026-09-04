@@ -639,10 +639,17 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
         </button>
       </div>
 
-      {/* Result banner + version toggle */}
+      {/* Result banner + version toggle. When restored (no fresh `result` in
+          this tab yet), the counts come from the same lineage summary the
+          Transformation Log below reads — otherwise the two would disagree
+          about whether anything was removed. */}
       {(result || hasCleanedData) && (
         <ResultBanner
-          result={result || { rows_before: 0, rows_after: 0, rows_removed: 0 }}
+          result={result || (restoredLineage ? {
+            rows_before: restoredLineage.summary.rows_original,
+            rows_after: restoredLineage.summary.rows_final,
+            rows_removed: restoredLineage.summary.rows_removed,
+          } : { rows_before: 0, rows_after: 0, rows_removed: 0 })}
           version={cleanVersion}
           onVersionSwitch={handleVersionSwitch}
         />
