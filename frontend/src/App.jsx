@@ -9,7 +9,15 @@ import Visualize from './components/Visualize.jsx'
 import Analyze from './components/Analyze.jsx'
 import Export from './components/Export.jsx'
 import Clean from './components/Clean.jsx'
-import { getModels, streamQuery, getSessionInfo } from './api.js'
+import Recommendations from './components/Recommendations.jsx'
+import { getModels, streamQuery, getSessionInfo, getHealth } from './api.js'
+
+// A refresh used to lose the whole session — upload, chat, cleaning state —
+// even though the backend keeps it around until the LRU/TTL eviction. Only
+// the id is persisted; everything else is re-fetched from the server, which
+// stays the single source of truth (a stale copy of rows/columns cached in
+// the browser could drift from what the backend actually holds).
+const SESSION_ID_KEY = 'lana_session_id'
 
 const TABS = [
   { id: 'askai',     label: 'Ask AI' },
@@ -34,6 +42,8 @@ export default function App() {
   const [previewOpen, setPreviewOpen] = useState(false)
   const [cleanVersion,  setCleanVersion]  = useState('original')
   const [hasCleanedData, setHasCleanedData] = useState(false)
+  const [llmStatus, setLlmStatus] = useState(null)
+  const [restoring, setRestoring] = useState(true)
 
   // AskAI state — lifted here so messages survive tab switches
   // and so we can control the fixed-input / scrollable-messages split
@@ -46,12 +56,44 @@ export default function App() {
     getModels().then(d => setModels(d.models || [])).catch(() => {})
   }, [])
 
+  // Real LLM availability for the sidebar status pill, polled rather than
+  // checked once — Ollama can go down (or come back) while the tab is open.
+  useEffect(() => {
+    let cancelled = false
+    function check() {
+      getHealth()
+        .then(h => { if (!cancelled) setLlmStatus(h.llm) })
+        .catch(() => { if (!cancelled) setLlmStatus({ available: false, name: null }) })
+    }
+    check()
+    const id = setInterval(check, 30_000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [])
+
+  // Restore a session across a page refresh. Only the id survived the
+  // reload; everything else (rows, columns, cleaning state) is re-fetched so
+  // the browser never shows stale data the backend has since moved past. If
+  // the session was evicted (LRU/TTL) the backend 404s and this just falls
+  // through to the normal Upload screen.
+  useEffect(() => {
+    const storedId = sessionStorage.getItem(SESSION_ID_KEY)
+    if (!storedId) { setRestoring(false); return }
+    getSessionInfo(storedId)
+      .then(info => {
+        setSession(info)
+        setCleanVersion(info.version || 'original')
+        setHasCleanedData(!!info.has_cleaned)
+        setView('app')
+      })
+      .catch(() => sessionStorage.removeItem(SESSION_ID_KEY))
+      .finally(() => setRestoring(false))
+  }, [])
+
   // Reset per-session state when a new dataset is loaded
   useEffect(() => {
     setAiMessages([])
     setAiInput('')
-    setCleanVersion('original')
-    setHasCleanedData(false)
+    if (session) sessionStorage.setItem(SESSION_ID_KEY, session.session_id)
   }, [session?.session_id])
 
   // Auto-scroll the AI thread to the latest message
@@ -102,14 +144,26 @@ export default function App() {
     }
   }
 
+  // Brief gate while a stored session id is checked against the backend, so
+  // a returning user doesn't see the marketing Landing page flash before
+  // being dropped back into their dataset.
+  if (restoring) return <div style={s.bootScreen} />
+
   if (view === 'landing') return <Landing onTry={() => setView('app')} />
 
   return (
     <div style={s.layout}>
       <Sidebar
         session={session}
-        onUploadNew={() => { setSession(null); setPreviewOpen(false); setAiMessages([]) }}
-        onGoHome={() => setView('landing')}
+        llmStatus={llmStatus}
+        onUploadNew={() => {
+          sessionStorage.removeItem(SESSION_ID_KEY)
+          setSession(null)
+          setPreviewOpen(false)
+          setAiMessages([])
+          setCleanVersion('original')
+          setHasCleanedData(false)
+        }}
       />
 
       <div style={s.main}>
@@ -130,7 +184,12 @@ export default function App() {
 
         {!session ? (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <Upload onUpload={sess => { setSession(sess); setTab('askai') }} />
+            <Upload onUpload={sess => {
+              setSession(sess)
+              setTab('askai')
+              setCleanVersion('original')
+              setHasCleanedData(false)
+            }} />
           </div>
         ) : (
           <div style={s.sessionShell}>
@@ -179,6 +238,11 @@ export default function App() {
               <div ref={aiScrollRef} style={s.aiScroll}>
                 <KpiTiles session={session} />
                 {previewOpen && <div style={{ marginTop: 16 }}><DataPreview preview={session.preview} columns={session.columns} /></div>}
+                {aiMessages.length === 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    <Recommendations sessionId={session.session_id} onGoTo={setTab} />
+                  </div>
+                )}
                 <div style={{ marginTop: 20 }}>
                   <AskAI messages={aiMessages} />
                 </div>
@@ -268,6 +332,7 @@ export default function App() {
 
 /* ── Styles ─────────────────────────────────────────────────────────────────── */
 const s = {
+  bootScreen: { height: '100vh', background: 'var(--bg)' },
   layout:  { display: 'flex', height: '100vh', overflow: 'hidden' },
   main:    { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', marginLeft: 'var(--sidebar)' },
 
