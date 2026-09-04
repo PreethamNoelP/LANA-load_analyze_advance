@@ -18,7 +18,8 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.figure import Figure
 
-from ..data.profile import profile_dataframe
+from ..data.profile import ColumnProfile, profile_dataframe
+from ..resources import PLOT_POINT_LIMIT, SAMPLE_SEED
 
 CHART_TYPES = [
     "Histogram",
@@ -55,11 +56,41 @@ def _annotate(ax, message: str) -> None:
     ax.set_axis_off()
 
 
+def _note_sample(ax, shown: int, total: int) -> None:
+    """State on the figure itself that it was drawn from a sample.
+
+    A plot is a claim about the data. One drawn from 50,000 of 4,000,000 rows
+    is a different claim from one drawn from all of them, and the difference
+    has to be visible on the artifact that gets screenshotted into a report —
+    not only in an API field the image leaves behind.
+    """
+    ax.text(
+        0.995, -0.14,
+        f"drawn from a fixed random sample of {shown:,} of {total:,} rows",
+        transform=ax.transAxes, ha="right", va="top", fontsize=7, alpha=0.75,
+    )
+
+
+def _downsample(frame: pd.DataFrame, limit: int = PLOT_POINT_LIMIT):
+    """Reduce a frame to at most ``limit`` rows, deterministically.
+
+    Returns ``(frame, was_sampled)``. A figure is about 1,000 px across, so
+    beyond a few tens of thousands of points a scatter or line plot is drawing
+    on top of itself: the marks that land on an occupied pixel cost CPU and
+    add nothing a viewer can see. Sampling is seeded so the same dataset
+    always yields the same picture.
+    """
+    if len(frame) <= limit:
+        return frame, False
+    return frame.sample(limit, random_state=SAMPLE_SEED).sort_index(), True
+
+
 def create_chart(
     df: pd.DataFrame,
     chart_type: str,
     column: str,
     secondary_column: str | None = None,
+    profiles: dict[str, ColumnProfile] | None = None,
 ) -> bytes:
     """Render one of the supported chart types and return PNG bytes.
 
@@ -69,6 +100,8 @@ def create_chart(
     chart_type:       One of CHART_TYPES.
     column:           Primary column to visualise.
     secondary_column: X-axis for Scatter Plot; ignored for others.
+    profiles:         Precomputed column profiles, if the caller has them.
+                      Only the Heatmap needs them.
     """
     if column not in df.columns:
         raise ValueError(f"Column '{column}' not found.")
@@ -77,7 +110,7 @@ def create_chart(
 
     fig = Figure(figsize=(10, 5))
     ax = fig.subplots()
-    _draw(df, chart_type, column, secondary_column, ax)
+    _draw(df, chart_type, column, secondary_column, ax, profiles)
     fig.tight_layout()
     return _to_bytes(fig)
 
@@ -88,6 +121,7 @@ def _draw(
     column: str,
     secondary_column: str | None,
     ax,
+    profiles: dict[str, ColumnProfile] | None = None,
 ) -> None:
     numeric = pd.api.types.is_numeric_dtype(df[column])
 
@@ -99,11 +133,20 @@ def _draw(
                       f"Use a Bar Chart or Pie Chart to show its frequencies.")
         return
 
+    # Only the columns being drawn are pulled out. Handing seaborn the whole
+    # frame makes it process every column to plot one, which on a wide upload
+    # is the dominant cost of rendering a single-series chart.
     if chart_type == "Line Plot":
-        sns.lineplot(data=df, x=df.index, y=column, ax=ax)
+        data, sampled = _downsample(df[[column]].dropna())
+        sns.lineplot(x=data.index, y=data[column], ax=ax)
         ax.set_title(f"Line Plot — {column}")
+        ax.set_ylabel(column)
+        if sampled:
+            _note_sample(ax, len(data), len(df))
 
     elif chart_type == "Bar Chart":
+        # value_counts already aggregates, so there is nothing to downsample:
+        # the cost is one pass and the output is bounded by MAX_CATEGORIES.
         counts = df[column].value_counts().head(MAX_CATEGORIES)
         sns.barplot(x=counts.index.astype(str), y=counts.values, ax=ax)
         total = int(df[column].nunique())
@@ -113,24 +156,56 @@ def _draw(
         ax.tick_params(axis="x", rotation=45)
 
     elif chart_type == "Scatter Plot":
-        x = secondary_column if secondary_column else df.index
-        sns.scatterplot(data=df, x=x, y=column, ax=ax)
+        if secondary_column:
+            data, sampled = _downsample(df[[secondary_column, column]].dropna())
+            sns.scatterplot(x=data[secondary_column], y=data[column], ax=ax)
+            ax.set_xlabel(secondary_column)
+        else:
+            data, sampled = _downsample(df[[column]].dropna())
+            sns.scatterplot(x=data.index, y=data[column], ax=ax)
+        ax.set_ylabel(column)
         ax.set_title(f"Scatter Plot — {column}")
+        if sampled:
+            _note_sample(ax, len(data), len(df))
 
     elif chart_type == "Histogram":
-        sns.histplot(df[column].dropna(), kde=True, ax=ax)
-        ax.set_title(f"Histogram — {column}")
+        values = df[column].dropna()
+        # The bars are binned counts and cost one pass at any size, but the KDE
+        # overlay fits a kernel per observation, which is what makes a large
+        # histogram slow. Above the point limit the curve is estimated from a
+        # sample; the bars stay exact, computed from every row.
+        if len(values) > PLOT_POINT_LIMIT:
+            sns.histplot(values, kde=False, ax=ax)
+            curve = values.sample(PLOT_POINT_LIMIT, random_state=SAMPLE_SEED)
+            twin = ax.twinx()
+            sns.kdeplot(curve, ax=twin, color="tab:orange", linewidth=1.4)
+            twin.set_ylabel("")
+            twin.set_yticks([])
+            ax.set_title(f"Histogram — {column} (bars exact; curve from a sample)")
+            _note_sample(ax, len(curve), len(values))
+        else:
+            sns.histplot(values, kde=True, ax=ax)
+            ax.set_title(f"Histogram — {column}")
 
     elif chart_type == "Box Plot":
-        sns.boxplot(data=df, y=column, ax=ax)
+        # A box plot is five quantiles plus the points outside the whiskers;
+        # quantiles are cheap on any size, so this stays exact.
+        sns.boxplot(y=df[column], ax=ax)
+        ax.set_ylabel(column)
         ax.set_title(f"Box Plot — {column}")
 
     elif chart_type == "Heatmap":
-        _draw_heatmap(df, ax)
+        _draw_heatmap(df, ax, profiles)
 
     elif chart_type == "Violin Plot":
-        sns.violinplot(data=df, y=column, ax=ax)
+        # Unlike the box plot, a violin is a kernel density estimate, so its
+        # cost grows with the row count and it does need a bounded input.
+        data, sampled = _downsample(df[[column]].dropna())
+        sns.violinplot(y=data[column], ax=ax)
+        ax.set_ylabel(column)
         ax.set_title(f"Violin Plot — {column}")
+        if sampled:
+            _note_sample(ax, len(data), len(df))
 
     elif chart_type == "Pie Chart":
         counts = df[column].value_counts().head(MAX_PIE_SLICES)
@@ -141,14 +216,27 @@ def _draw(
         ax.set_title(f"Pie Chart — {column}{suffix}")
 
     elif chart_type == "Area Plot":
-        df[column].plot(kind="area", ax=ax, alpha=0.6)
+        data, sampled = _downsample(df[[column]].dropna())
+        data[column].plot(kind="area", ax=ax, alpha=0.6)
+        ax.set_ylabel(column)
         ax.set_title(f"Area Plot — {column}")
+        if sampled:
+            _note_sample(ax, len(data), len(df))
 
     else:
         _annotate(ax, f"Unknown chart type: {chart_type}")
 
 
-def _draw_heatmap(df: pd.DataFrame, ax) -> None:
+# A correlation matrix is annotated cell by cell; past this many columns the
+# numbers are unreadable and the render cost grows with the square of the count.
+MAX_HEATMAP_COLUMNS = 25
+
+
+def _draw_heatmap(
+    df: pd.DataFrame,
+    ax,
+    profiles: dict[str, ColumnProfile] | None = None,
+) -> None:
     """Correlation matrix over genuine measurements only.
 
     Identifiers and LANA's own annotation columns are excluded for the same
@@ -157,7 +245,8 @@ def _draw_heatmap(df: pd.DataFrame, ax) -> None:
     row ID correlates with whatever the rows were sorted by. Left in, those
     cells are the brightest thing in the plot and mean nothing.
     """
-    profiles = profile_dataframe(df)
+    if profiles is None:
+        profiles = profile_dataframe(df)
     usable = [name for name, p in profiles.items() if p.is_numeric_measure]
     excluded = [
         name for name, p in profiles.items()
@@ -170,9 +259,24 @@ def _draw_heatmap(df: pd.DataFrame, ax) -> None:
                          if excluded else ""))
         return
 
-    sns.heatmap(df[usable].corr(), annot=True, fmt=".2f",
+    truncated = len(usable) - MAX_HEATMAP_COLUMNS
+    usable = usable[:MAX_HEATMAP_COLUMNS]
+
+    # Sampled above the point limit: a coefficient over 50,000 rows already
+    # agrees with the full-data figure to more decimal places than a two-digit
+    # cell label can show, and the matrix is the most expensive chart here.
+    source, sampled = _downsample(df[usable])
+
+    sns.heatmap(source.corr(), annot=True, fmt=".2f",
                 cmap="coolwarm", ax=ax, linewidths=0.5)
     title = "Correlation Heatmap"
+    notes = []
     if excluded:
-        title += f"  (excluded {len(excluded)} ID/annotation column(s))"
+        notes.append(f"excluded {len(excluded)} ID/annotation column(s)")
+    if truncated > 0:
+        notes.append(f"first {MAX_HEATMAP_COLUMNS} of {MAX_HEATMAP_COLUMNS + truncated}")
+    if notes:
+        title += "  (" + "; ".join(notes) + ")"
     ax.set_title(title)
+    if sampled:
+        _note_sample(ax, len(source), len(df))
