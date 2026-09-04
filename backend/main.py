@@ -315,9 +315,17 @@ async def upload(file: UploadFile = File(...)):
 
 @app.get("/session/{session_id}")
 def session_info(session_id: str):
-    """Metadata + preview for the currently active version (original or cleaned)."""
+    """Metadata + preview for the currently active version (original or cleaned).
+
+    Includes ``quality`` (cheap here — reads the session's cached profiles,
+    not a fresh scan) so a session restored from a stored id after a page
+    refresh renders the same KPI tiles a fresh upload does, rather than
+    silently missing the quality score until the next cleaning action
+    happens to refresh it.
+    """
     session = _get_session(session_id)
     df = session.active
+    profiles = session.profiles()
     return _jsonable({
         "session_id": session_id,
         "filename": session.filename,
@@ -327,6 +335,7 @@ def session_info(session_id: str):
         "preview": _preview(df),
         "version": session.active_version,
         "has_cleaned": session.has_cleaned,
+        "quality": dataset_quality(profiles, len(df)),
     })
 
 

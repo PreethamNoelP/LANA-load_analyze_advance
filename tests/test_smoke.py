@@ -314,6 +314,17 @@ def test_models_falls_back_to_empty_on_any_failure(client, monkeypatch):
     assert client.get("/models").json() == {"models": []}
 
 
+def test_session_info_includes_quality_for_restore(client):
+    # A session restored from a stored id (frontend sessionStorage, after a
+    # page refresh) only ever calls GET /session/{id} - it must carry the
+    # same quality score /upload returns, or the restored KPI tiles silently
+    # drop the quality tile until some other action happens to refresh it.
+    sid = upload(client)["session_id"]
+    body = client.get(f"/session/{sid}").json()
+    assert "score" in body["quality"]
+    assert "grade" in body["quality"]
+
+
 def test_correlation_endpoint(client):
     sid = upload(client)["session_id"]
     r = client.get(f"/correlation/{sid}")
