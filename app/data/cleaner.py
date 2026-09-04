@@ -49,15 +49,18 @@ def _indicator_name(column: str) -> str:
 
 # ── Detection ────────────────────────────────────────────────────────────────
 
-def detect_issues(df: pd.DataFrame) -> dict:
+def detect_issues(df: pd.DataFrame, profiles: dict | None = None) -> dict:
     """Scan a DataFrame and return a structured map of data quality issues.
 
     Read-only. Every finding carries the reasoning behind it, and every
     suggested remedy carries its statistical justification — the user is
     given a recommendation to accept or reject, never an action already taken.
+
+    ``profiles`` may be supplied by a caller that already computed them.
     """
     issues: dict = {}
-    profiles = profile_dataframe(df)
+    if profiles is None:
+        profiles = profile_dataframe(df)
 
     # ── 0. Column types and profiles ─────────────────────────────────────────
     # Not "issues" — always reported so the UI can offer a type override
