@@ -43,6 +43,36 @@ MAX_CORRELATIONS = 8
 # 66 pairs, of which only the strongest are rendered.
 MAX_CORRELATION_COLUMNS = 12
 
+# Token budget for the whole context block. The column and category caps above
+# bound the *shape* of the context but not its length: 30 columns each with 12
+# categories, plus group averages and correlations, can exceed a model's window
+# on its own. When it does, Ollama truncates from the front — silently
+# discarding the DATASET FACTS the answer depends on while leaving the question
+# intact, which produces a confident answer grounded in nothing.
+#
+# So the length is measured and trimmed here instead, from the least
+# answer-critical section first, and whatever was dropped is *stated* in the
+# LIMITS block. A context that admits it is partial is usable; one that was
+# quietly cut is not.
+#
+# Reserve covers the system prompt, the question, and the model's own reply.
+CONTEXT_TOKEN_RESERVE = 1200
+
+# Characters per token. English prose with numbers runs ~4; 3.5 is deliberately
+# pessimistic so the estimate errs toward trimming early rather than
+# overflowing. Avoids a tokenizer dependency for a budget check.
+CHARS_PER_TOKEN = 3.5
+
+# Trimmed in this order. Column descriptions are load-bearing for almost every
+# question and are given up last; correlations are the most specialised and go
+# first.
+_TRIM_ORDER = ("relationships", "groups", "breakdowns")
+
+
+def estimate_tokens(text: str) -> int:
+    """Approximate token count for a budget check, without a tokenizer."""
+    return int(len(text) / CHARS_PER_TOKEN) + 1
+
 
 @dataclass
 class Fact:
@@ -77,19 +107,30 @@ def build_context(
     df: pd.DataFrame,
     lineage_narrative: str | None = None,
     version: str = "original",
+    profiles: dict[str, ColumnProfile] | None = None,
+    token_budget: int | None = None,
 ) -> GroundedContext:
     """Assemble the grounded context for a DataFrame.
 
     ``lineage_narrative`` is the cleaning ledger's account of how this version
     was produced. Including it is what stops the model describing imputed
     values as if they were measured.
+
+    ``profiles`` lets a caller that already holds them supply them instead of
+    paying to re-derive them. A stored frame never changes, so profiling it
+    twice can only produce the same answer more slowly.
+
+    ``token_budget`` is the model's context window. Sections are dropped from
+    the least answer-critical end until the block fits, and every drop is
+    disclosed in LIMITS OF THIS CONTEXT.
     """
-    profiles = profile_dataframe(df)
+    if profiles is None:
+        profiles = profile_dataframe(df)
     facts: list[Fact] = []
     ranges: dict[str, tuple[float, float]] = {}
     vocabulary: set[str] = {str(c) for c in df.columns}
 
-    lines: list[str] = [
+    header: list[str] = [
         "=== DATASET FACTS ===",
         f"This is the '{version}' version of the uploaded dataset.",
         f"Shape: {len(df):,} rows x {len(df.columns)} columns.",
@@ -100,30 +141,59 @@ def build_context(
 
     # ── Provenance ───────────────────────────────────────────────────────────
     if lineage_narrative:
-        lines += ["", "--- HOW THIS VERSION WAS PRODUCED ---", lineage_narrative]
+        header += ["", "--- HOW THIS VERSION WAS PRODUCED ---", lineage_narrative]
 
     # ── Column-level facts ───────────────────────────────────────────────────
     detail = list(profiles.items())[:MAX_DETAIL_COLUMNS]
     omitted = [name for name, _ in list(profiles.items())[MAX_DETAIL_COLUMNS:]]
 
-    lines += ["", "--- COLUMNS ---"]
+    header += ["", "--- COLUMNS ---"]
     for name, p in detail:
-        lines.append(_describe_column(name, p, facts, ranges, vocabulary))
+        header.append(_describe_column(name, p, facts, ranges, vocabulary))
 
-    # ── Category breakdowns: what "which X has the most Y" needs ─────────────
+    # Sections are kept separate rather than appended to one list so the
+    # budget check below can drop a whole section cleanly. Facts stay in the
+    # ledger even if their section is dropped from the prompt — the validator
+    # verifies against what LANA computed, not against what the model was
+    # shown, so a number the model produced from general knowledge that
+    # happens to match a dropped fact is still correctly marked verified.
+    sections: dict[str, list[str]] = {}
+
     breakdown_lines = _category_breakdowns(df, profiles, facts, vocabulary)
     if breakdown_lines:
-        lines += ["", "--- CATEGORY BREAKDOWNS (exact counts) ---", *breakdown_lines]
+        sections["breakdowns"] = [
+            "", "--- CATEGORY BREAKDOWNS (exact counts) ---", *breakdown_lines
+        ]
 
-    # ── Group-by aggregates: the other half of comparative questions ─────────
     group_lines = _group_summaries(df, profiles, facts)
     if group_lines:
-        lines += ["", "--- GROUP AVERAGES (exact) ---", *group_lines]
+        sections["groups"] = ["", "--- GROUP AVERAGES (exact) ---", *group_lines]
 
-    # ── Relationships, corrected for multiple testing ────────────────────────
     corr_lines = _correlation_summary(df, profiles, facts)
     if corr_lines:
-        lines += ["", "--- RELATIONSHIPS BETWEEN NUMERIC COLUMNS ---", *corr_lines]
+        sections["relationships"] = [
+            "", "--- RELATIONSHIPS BETWEEN NUMERIC COLUMNS ---", *corr_lines
+        ]
+
+    # ── Fit to the model's window, dropping the least critical first ──────────
+    dropped: list[str] = []
+    if token_budget:
+        allowance = max(0, token_budget - CONTEXT_TOKEN_RESERVE)
+        for name in _TRIM_ORDER:
+            if name not in sections:
+                continue
+            current = estimate_tokens(
+                "\n".join(header + [ln for k in sections for ln in sections[k]])
+            )
+            if current <= allowance:
+                break
+            sections.pop(name)
+            dropped.append(name)
+
+    lines = list(header)
+    for name in ("breakdowns", "groups", "relationships"):
+        if name in sections:
+            lines += sections[name]
 
     # ── Explicit statement of what is missing from this context ──────────────
     lines += ["", "--- LIMITS OF THIS CONTEXT ---"]
@@ -148,18 +218,33 @@ def build_context(
             "Category lists are truncated to the most frequent values for: "
             f"{', '.join(truncated[:8])}. Lower-frequency categories exist but are not shown."
         )
+    if dropped:
+        readable = {
+            "breakdowns": "exact category counts",
+            "groups": "group averages",
+            "relationships": "correlations between numeric columns",
+        }
+        limits.append(
+            "This dataset is too wide to describe fully within the model's context "
+            "window, so the following were omitted entirely and you know nothing "
+            f"about them: {', '.join(readable[d] for d in dropped)}. Say so if a "
+            "question needs them."
+        )
     lines += [f"- {limit}" for limit in limits]
 
+    text = "\n".join(lines)
     coverage = {
         "columns_total": len(df.columns),
         "columns_detailed": len(detail),
         "columns_omitted": omitted,
         "facts": len(facts),
         "version": version,
+        "estimated_tokens": estimate_tokens(text),
+        "sections_dropped": dropped,
     }
 
     return GroundedContext(
-        text="\n".join(lines),
+        text=text,
         facts=facts,
         column_ranges=ranges,
         vocabulary=vocabulary,
@@ -322,7 +407,14 @@ def _correlation_summary(
         return []
 
     try:
-        pairs = compute_correlations(df[numeric])
+        # Hand down the profiles for exactly these columns. A per-column
+        # profile does not depend on which other columns are present, so the
+        # subset is identical to what the scan would compute for itself — and
+        # this is the difference between profiling the frame once per question
+        # and profiling it twice.
+        pairs = compute_correlations(
+            df[numeric], profiles={name: profiles[name] for name in numeric}
+        )
     except Exception:
         return []
     if not pairs:
