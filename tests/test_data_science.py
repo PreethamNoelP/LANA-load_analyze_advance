@@ -381,6 +381,44 @@ def test_context_includes_group_aggregates_not_just_column_moments(sales_df):
     assert any(f.label.startswith("mean revenue for region=") for f in context.facts)
 
 
+def test_group_averages_include_discrete_coded_columns_too(sales_df):
+    # Regression for a real scope gap (docs/engineering-changelog.md,
+    # 2026-08-19): "average rating by region" used to be unanswerable because
+    # _group_summaries excluded discrete-coded columns from the numeric side
+    # entirely, not just from outlier analysis (where that exclusion is
+    # correct — a 5 on a 1-5 scale isn't an outlier).
+    context = build_context(sales_df)
+    assert any(f.label.startswith("mean rating for region=") for f in context.facts)
+    assert "encoded scale" in context.text
+
+
+def test_a_column_is_never_grouped_by_itself():
+    df = pd.DataFrame({"rating": [1, 2, 3, 4, 5] * 20, "region": ["north", "south"] * 50})
+    context = build_context(df)
+    assert not any("'rating' by 'rating'" in line for line in context.text.splitlines())
+
+
+def test_context_includes_a_regression_coefficient_for_a_real_relationship():
+    # Another named scope gap: build_context surfaced Pearson r but never a
+    # regression coefficient, so "what's the slope" had no fact to answer it.
+    r = rng()
+    x = r.normal(size=200)
+    df = pd.DataFrame({"x": x, "y": 3 * x + r.normal(scale=0.5, size=200)})
+    context = build_context(df)
+    assert "Regression of 'y' on 'x'" in context.text
+    coeff = next(f for f in context.facts if f.label == "regression coefficient of y on x")
+    assert 2.5 < coeff.value < 3.5
+    assert any(f.label == "regression R2 of y on x" for f in context.facts)
+    # Still associational language, same as the correlation section.
+    assert "not a causal effect" in context.text
+
+
+def test_no_regression_fact_when_nothing_correlates():
+    noise = pd.DataFrame(rng().normal(size=(120, 4)), columns=["a", "b", "c", "d"])
+    context = build_context(noise)
+    assert not any(f.label.startswith("regression coefficient") for f in context.facts)
+
+
 def test_context_states_what_it_does_not_contain(sales_df):
     text = build_context(sales_df).text
     assert "LIMITS OF THIS CONTEXT" in text

@@ -257,3 +257,59 @@ looks and behaves as intended.
 **Result.** The boundary from the previous entry is now something a caller
 can point to — in the API response, in the UI, and in a document that
 quotes the exact same source instead of restating it.
+
+---
+
+## 2026-09-05 — Close the two named context scope gaps
+
+**Problem.** The 2026-08-19 eval entry named two specific, non-hallucination
+failures as scope boundaries rather than bugs: `build_context()` never
+surfaced a regression coefficient (only Pearson `r`), and `_group_summaries()`
+deliberately excluded discrete-coded columns (a 1-5 rating, say) from being
+averaged by group — so "average rating by region" and "what's the
+regression coefficient" had no fact to answer either question from, no
+matter how the model was prompted.
+
+**Solution.**
+- `_group_summaries()` (`app/llm/context.py`) now also averages
+  discrete-coded numeric columns by group, in addition to continuous ones —
+  capped at `MAX_GROUPBY_DISCRETE_NUMERICS = 1` and added on top of the
+  existing continuous-numeric budget, not instead of it, since the encoded-
+  scale case is supplementary. Each such line is explicitly labelled
+  `[encoded scale — average is illustrative, not a continuous measurement]`
+  rather than presented with the same implied precision as a real
+  measurement — the exclusion from *outlier* analysis
+  (`supports_outlier_analysis`) was always correct and is untouched; this
+  only lifts the exclusion from *group averaging*, which is a different
+  question with a different answer. Also guards against grouping a column
+  by itself, now that a discrete column can appear on both sides.
+- A new `_regression_lines()` fits `perform_linear_regression()` (the
+  existing, already-tested regression module — no new statistics were
+  written) for the top `MAX_REGRESSIONS = 2` already-significant correlated
+  pairs, and adds the coefficient, intercept, R² and CI95 as both prompt
+  text and `Fact`s. Bounded to 2 pairs deliberately: an OLS fit costs more
+  than a correlation coefficient, and this only needs to answer "what's the
+  slope for the relationship that already matters," not run an exhaustive
+  regression scan.
+
+**Why this approach.** Both gaps were already precisely named in the
+2026-08-19 entry, which is what made this a scoped fix rather than open-
+ended: no new statistical method was invented, no new validator logic was
+touched, and both additions reuse functions (`perform_linear_regression`,
+the existing `discrete_code`/`is_numeric_measure` profile flags) that were
+already in the codebase and already tested elsewhere.
+
+**Tradeoff.** None identified against the two gaps named. A real, adjacent
+limitation this does *not* address: which of the two correlated columns
+becomes `x` (predictor) vs `y` (outcome) in the regression line is an
+arbitrary convention (`column_a` as `x`, `column_b` as `y`, matching
+`generate_recommendations()`'s existing convention) — correlation itself
+carries no directionality, and neither does this fit. The prose says so
+("an association in this data, not a causal effect"), consistent with the
+regression module's own existing caveat language.
+
+**Tests.** Added 4 tests to `tests/test_data_science.py`'s LLM-grounding
+section: discrete-coded group averages appear and are labelled, a column is
+never grouped by itself, a real relationship produces a regression fact
+with the right coefficient sign and magnitude, and pure noise produces none.
+Full suite: 121 passed (was 117).

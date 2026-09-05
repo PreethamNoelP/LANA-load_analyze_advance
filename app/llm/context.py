@@ -28,6 +28,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..analysis.regression import perform_linear_regression
 from ..analysis.statistics import compute_correlations
 from ..data.profile import ColumnKind, ColumnProfile, profile_dataframe
 
@@ -37,8 +38,19 @@ MAX_DETAIL_COLUMNS = 30
 MAX_CATEGORIES_PER_COLUMN = 12
 MAX_GROUPBY_CATEGORICALS = 3
 MAX_GROUPBY_NUMERICS = 2
+# A discrete-coded column (e.g. a 1-5 rating) averaged by group is a
+# genuinely common, meaningful question ("average rating by region") even
+# though the column isn't a continuous measurement — this was previously
+# excluded entirely (see docs/engineering-changelog.md, 2026-08-19 entry).
+# Capped lower than MAX_GROUPBY_NUMERICS and added on top of it, not instead,
+# since it's the supplementary case, not the common one.
+MAX_GROUPBY_DISCRETE_NUMERICS = 1
 MAX_GROUPBY_LEVELS = 15
 MAX_CORRELATIONS = 8
+# Regression is heavier than a correlation coefficient (a full OLS fit per
+# pair), so only the strongest, already-significant relationships get one -
+# enough to answer "what's the regression coefficient", not an exhaustive scan.
+MAX_REGRESSIONS = 2
 # Pairs grow quadratically and the prompt has a fixed budget; 12 columns is
 # 66 pairs, of which only the strongest are rendered.
 MAX_CORRELATION_COLUMNS = 12
@@ -366,13 +378,26 @@ def _group_summaries(
         name for name, p in profiles.items()
         if p.is_numeric_measure and not p.discrete_code
     ][:MAX_GROUPBY_NUMERICS]
+    # An encoded scale (e.g. a 1-5 rating) averaged by group is a real,
+    # commonly-asked question ("average rating by region") even though the
+    # column isn't a continuous measurement. Kept separate from `numerics`
+    # so it's labelled distinctly rather than presented as if it carried the
+    # same precision as an actual measurement.
+    discrete_numerics = [
+        name for name, p in profiles.items()
+        if p.is_numeric_measure and p.discrete_code
+    ][:MAX_GROUPBY_DISCRETE_NUMERICS]
 
-    if not categoricals or not numerics:
+    if not categoricals or (not numerics and not discrete_numerics):
         return []
+
+    targets = [(n, False) for n in numerics] + [(n, True) for n in discrete_numerics]
 
     lines: list[str] = []
     for cat in categoricals:
-        for num in numerics:
+        for num, is_discrete in targets:
+            if num == cat:
+                continue  # a column can't be meaningfully grouped by itself
             try:
                 grouped = df.groupby(cat, observed=True)[num].agg(["mean", "count", "sum"])
             except (TypeError, ValueError):
@@ -389,8 +414,9 @@ def _group_summaries(
                 facts.append(Fact(f"total {num} for {cat}={label}",
                                   round(float(row["sum"]), 6), column=num))
             best, worst = grouped.index[0], grouped.index[-1]
+            note = " [encoded scale — average is illustrative, not a continuous measurement]" if is_discrete else ""
             lines.append(
-                f"- '{num}' by '{cat}' (highest mean first): " + "; ".join(parts)
+                f"- '{num}' by '{cat}' (highest mean first){note}: " + "; ".join(parts)
                 + f". Highest: {best}. Lowest: {worst}."
             )
     return lines
@@ -441,4 +467,42 @@ def _correlation_summary(
             "one as a finding."
         )
     lines.append("- Correlation is association only. Never describe it as one column causing another.")
+    lines += _regression_lines(df, significant, facts)
+    return lines
+
+
+def _regression_lines(
+    df: pd.DataFrame,
+    significant_pairs: list[dict[str, Any]],
+    facts: list[Fact],
+) -> list[str]:
+    """OLS slope/intercept/R^2 for the strongest significant pairs.
+
+    Correlation alone cannot answer "what's the regression coefficient" or
+    "how much does Y change per unit of X" — a real question a user asks
+    once a relationship is established (docs/engineering-changelog.md,
+    2026-08-19 entry names this exact gap). Bounded to the top few pairs
+    because a full OLS fit costs more than a correlation coefficient.
+    """
+    lines: list[str] = []
+    for pair in significant_pairs[:MAX_REGRESSIONS]:
+        x_col, y_col = pair["column_a"], pair["column_b"]
+        try:
+            reg = perform_linear_regression(df, x_col, y_col)
+        except Exception:
+            # Same columns the correlation scan just fit successfully; a
+            # regression-specific refusal (e.g. a post-hoc constant check)
+            # is rare enough to skip quietly rather than break the section.
+            continue
+        lines.append(
+            f"- Regression of '{y_col}' on '{x_col}': coefficient {_fmt(reg.coefficient)} "
+            f"(95% CI {_fmt(reg.ci95_low)} to {_fmt(reg.ci95_high)}), "
+            f"intercept {_fmt(reg.intercept)}, R^2 = {reg.r2:.3f} (n = {reg.n:,}). "
+            f"Each one-unit increase in '{x_col}' is associated with a "
+            f"{_fmt(reg.coefficient)} change in '{y_col}' — an association in this "
+            "data, not a causal effect."
+        )
+        facts.append(Fact(f"regression coefficient of {y_col} on {x_col}", round(reg.coefficient, 6)))
+        facts.append(Fact(f"regression intercept of {y_col} on {x_col}", round(reg.intercept, 6)))
+        facts.append(Fact(f"regression R2 of {y_col} on {x_col}", round(reg.r2, 6)))
     return lines
