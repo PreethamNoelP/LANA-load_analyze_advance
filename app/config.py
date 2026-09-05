@@ -2,6 +2,8 @@ import os
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
+from .resources import HOST
+
 load_dotenv()
 
 
@@ -39,9 +41,42 @@ def _parse_allowed_origins() -> list[str]:
 
 
 @dataclass
+class LimitsConfig:
+    """Session/upload/concurrency limits.
+
+    Upload and session-memory limits default to a value derived from this
+    machine's actual RAM (``app.resources.HOST``) rather than a flat
+    constant — the same build should not hand an 8 GB laptop and a 64 GB
+    workstation the same 2 GB budget. An explicit env var always overrides
+    the probe; the operator knows something it does not.
+    """
+
+    max_upload_mb: int = field(default_factory=lambda: int(os.getenv(
+        "LANA_MAX_UPLOAD_MB", str(max(8, int(HOST.upload_limit_bytes() / 1024 ** 2)))
+    )))
+    # Resident-bytes ceiling across all sessions. Session count alone is not a
+    # memory bound — a handful of wide uploads can exhaust the host well
+    # before the count limit is reached.
+    max_session_mb: int = field(default_factory=lambda: int(os.getenv(
+        "LANA_MAX_SESSION_MB", str(max(256, int(HOST.session_budget_bytes() / 1024 ** 2)))
+    )))
+    max_sessions: int = field(default_factory=lambda: int(os.getenv("LANA_MAX_SESSIONS", "30")))
+    session_ttl_seconds: float = field(
+        default_factory=lambda: float(os.getenv("LANA_SESSION_TTL_SECONDS", "3600"))
+    )
+    # Caps how many LLM requests run at once — a local Ollama model serves one
+    # request at a time well; without this, a burst of concurrent visitors all
+    # queue behind it and every answer appears to hang.
+    max_concurrent_llm: int = field(
+        default_factory=lambda: int(os.getenv("LANA_MAX_CONCURRENT_LLM", "2"))
+    )
+
+
+@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     allowed_origins: list[str] = field(default_factory=_parse_allowed_origins)
+    limits: LimitsConfig = field(default_factory=LimitsConfig)
 
 
 config = AppConfig()

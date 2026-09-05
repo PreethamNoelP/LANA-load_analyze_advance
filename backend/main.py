@@ -1,7 +1,6 @@
 import sys
 import json
 import logging
-import os
 import re
 import uuid
 import math
@@ -54,27 +53,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Limits are derived from the machine LANA is actually running on, not from
-# constants. The same 2 GB session budget is reckless on an 8 GB laptop and
-# needlessly stingy on a workstation, and LANA's whole premise is that it runs
-# on the user's own hardware. An explicit environment variable always wins —
-# the operator knows something the probe does not.
-MAX_UPLOAD_MB = int(os.getenv(
-    "LANA_MAX_UPLOAD_MB", str(max(8, int(HOST.upload_limit_bytes() / 1024 ** 2)))
-))
-MAX_SESSIONS = int(os.getenv("LANA_MAX_SESSIONS", "30"))
-# Resident-bytes ceiling across all sessions. Session count alone is not a
-# memory bound — a handful of wide uploads can exhaust the host well before
-# the count limit is reached.
-MAX_SESSION_MB = int(os.getenv(
-    "LANA_MAX_SESSION_MB", str(max(256, int(HOST.session_budget_bytes() / 1024 ** 2)))
-))
-SESSION_TTL_SECONDS = float(os.getenv("LANA_SESSION_TTL_SECONDS", "3600"))
+# All read from app.config.config.limits — the single place that reads these
+# env vars, host-adaptive defaults included. Kept as module-level names here
+# since they're referenced throughout this file.
+MAX_UPLOAD_MB = config.limits.max_upload_mb
+MAX_SESSIONS = config.limits.max_sessions
+MAX_SESSION_MB = config.limits.max_session_mb
+SESSION_TTL_SECONDS = config.limits.session_ttl_seconds
 
 # Caps how many LLM requests run at once — a local Ollama model serves one
 # request at a time well; without this, a burst of concurrent visitors all
 # queue behind it and every answer appears to hang.
-MAX_CONCURRENT_LLM = int(os.getenv("LANA_MAX_CONCURRENT_LLM", "2"))
+MAX_CONCURRENT_LLM = config.limits.max_concurrent_llm
 _llm_semaphore = threading.Semaphore(MAX_CONCURRENT_LLM)
 _LLM_BUSY_MSG = "The AI is busy answering other questions right now — try again in a moment."
 _LLM_DOWN_MSG = (
