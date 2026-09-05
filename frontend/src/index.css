@@ -56,3 +56,28 @@ select {
 }
 select:focus { border-color: var(--accent); }
 select option { background: #1a1d28; color: var(--text); }
+
+/* ── Responsive ────────────────────────────────────────────────────────────
+   LANA's primary surface (tables, charts, multi-column analysis forms) is
+   built for a real screen, and stays that way — this isn't a mobile
+   redesign. The goal is narrower: nothing overlaps, clips unreadably, or
+   pushes content off-screen with no way to reach it, down to a phone-sized
+   viewport. The sidebar collapses to an icon rail (only what a narrow
+   screen has room for), everything else reflows via plain CSS Grid/flex
+   already in place on the components themselves. */
+
+.lana-show-narrow { display: none; }
+
+@media (max-width: 860px) {
+  :root { --sidebar: 56px; }
+
+  .lana-hide-narrow { display: none !important; }
+  .lana-show-narrow { display: inline; }
+
+  .lana-topbar-modelpill { display: none; }
+  .lana-tabbar { overflow-x: auto; }
+}
+
+@media (max-width: 560px) {
+  .lana-subheader-filemeta { display: none; }
+}

@@ -173,7 +173,7 @@ export default function App() {
             L<span style={s.wordmarkAccent}>A</span>NA
           </button>
           <div style={{ flex: 1 }} />
-          {models.length > 0 && <span style={s.modelPill}>{models[0]}</span>}
+          {models.length > 0 && <span className="lana-topbar-modelpill" style={s.modelPill}>{models[0]}</span>}
           <div style={s.avatar}>
             <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="#fff" strokeWidth="2">
               <circle cx="12" cy="8" r="4"/>
@@ -203,7 +203,7 @@ export default function App() {
                   <polyline points="14 2 14 8 20 8"/>
                 </svg>
                 <span style={s.filename}>{session.filename}</span>
-                <span style={s.fileMeta}>
+                <span className="lana-subheader-filemeta" style={s.fileMeta}>
                   {session.rows.toLocaleString()} rows · {session.columns.length} cols
                 </span>
                 {hasCleanedData && (
@@ -221,7 +221,7 @@ export default function App() {
                   {previewOpen ? '↑ Hide preview' : '↓ Show preview'}
                 </button>
               </div>
-              <div style={s.tabBar}>
+              <div className="lana-tabbar" style={s.tabBar}>
                 {TABS.map(t => (
                   <button key={t.id} style={s.tabBtn(tab === t.id)} onClick={() => setTab(t.id)}>
                     {t.label}
@@ -349,7 +349,7 @@ const s = {
   sessionShell: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
 
   subHeader: { flexShrink: 0, background: 'var(--bg)', borderBottom: '1px solid var(--border)', padding: '14px 32px 0' },
-  fileRow:   { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 },
+  fileRow:   { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' },
   filename:  { fontWeight: 600, fontSize: 15 },
   fileMeta:  { fontSize: 12, color: 'var(--muted)', fontFamily: 'var(--ff-mono)' },
   previewBtn: {

@@ -27,7 +27,10 @@ export default function KpiTiles({ session }) {
   return (
     <div style={{
       display: 'grid',
-      gridTemplateColumns: `repeat(${tiles.length}, 1fr)`,
+      // auto-fit rather than a fixed repeat(N,1fr): on a narrow viewport the
+      // tiles wrap onto more rows at a readable width instead of all N
+      // columns compressing down to fit regardless of how narrow that gets.
+      gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
       gap: 12,
       marginBottom: 24,
     }}>

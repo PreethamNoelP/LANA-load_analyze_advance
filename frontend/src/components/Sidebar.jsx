@@ -29,7 +29,7 @@ function StatusPill({ llmStatus }) {
         width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
         background: color, boxShadow: checking ? 'none' : `0 0 6px ${color}`,
       }} />
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <span className="lana-hide-narrow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
     </div>
   )
 }
@@ -38,7 +38,7 @@ export default function Sidebar({ session, llmStatus, onUploadNew }) {
   const [confirmOpen, setConfirmOpen] = useState(false)
 
   return (
-    <aside style={{
+    <aside className="lana-sidebar" style={{
       position: 'fixed',
       top: 0, left: 0,
       width: 'var(--sidebar)',
@@ -58,8 +58,8 @@ export default function Sidebar({ session, llmStatus, onUploadNew }) {
         alignItems: 'center',
         gap: 8,
       }}>
-        <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--accent)' }} />
-        <span style={{ fontWeight: 700, fontSize: 20, letterSpacing: '-0.03em' }}>LANA</span>
+        <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--accent)', flexShrink: 0 }} />
+        <span className="lana-hide-narrow" style={{ fontWeight: 700, fontSize: 20, letterSpacing: '-0.03em' }}>LANA</span>
       </div>
 
       {/* LLM status */}
@@ -74,7 +74,7 @@ export default function Sidebar({ session, llmStatus, onUploadNew }) {
         borderTop: '1px solid var(--border)',
       }}>
         {session && (
-          <div style={{
+          <div className="lana-hide-narrow" style={{
             fontSize: 11,
             color: 'var(--muted)',
             fontFamily: 'var(--ff-mono)',
@@ -91,6 +91,7 @@ export default function Sidebar({ session, llmStatus, onUploadNew }) {
         )}
         <button
           onClick={() => session ? setConfirmOpen(true) : onUploadNew()}
+          title="New dataset"
           style={{
             display: 'block',
             width: '100%',
@@ -105,7 +106,8 @@ export default function Sidebar({ session, llmStatus, onUploadNew }) {
             cursor: 'pointer',
           }}
         >
-          + New dataset
+          <span className="lana-hide-narrow">+ New dataset</span>
+          <span className="lana-show-narrow">+</span>
         </button>
       </div>
 
