@@ -371,7 +371,7 @@ function LineagePanel({ lineage }) {
               background: step.destructive ? 'rgba(224,82,82,0.14)' : 'rgba(78,199,127,0.14)',
               color: step.destructive ? 'var(--red)' : 'var(--green)',
             }}>
-              {step.destructive ? 'destructive' : 'reversible'}
+              {step.destructive ? 'destructive' : 'non-destructive'}
             </span>
           </div>
           <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.55 }}>{step.rationale}</div>

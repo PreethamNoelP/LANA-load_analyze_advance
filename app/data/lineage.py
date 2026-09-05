@@ -2,11 +2,19 @@
 
 The rule this module enforces: nothing changes the data without leaving a
 record of *what* changed, *how much* changed, *why it was defensible*, and
-*whether it can be undone*. A cleaned dataset with no ledger is an
-unattributed claim; with one, every number in the final report can be traced
-back to the raw upload.
+*whether it discarded anything irreplaceable*. A cleaned dataset with no
+ledger is an unattributed claim; with one, every number in the final report
+can be traced back to the raw upload.
 
 Records are immutable and ordered. The ledger is append-only.
+
+``reversible``/``inverse`` on a record are audit metadata, not a working
+feature: they state whether an operation's effect *could* be reconstructed
+and, if so, what parameters that would take — but nothing in LANA actually
+reads ``inverse`` to reconstruct a frame. The real, working "undo" is
+switching the whole session back to the original version (`/clean/version`);
+there is no per-step undo endpoint. Do not present `reversible: true` to a
+user as "click to undo" — it is not that.
 """
 
 from __future__ import annotations
@@ -19,7 +27,9 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class TransformRecord:
-    """One applied operation, described completely enough to audit or reverse."""
+    """One applied operation, described completely enough to audit — and, in
+    principle, to manually reconstruct the prior state from ``inverse`` if the
+    caller writes that logic. LANA itself does not apply ``inverse`` anywhere."""
 
     step: int
     operation: str

@@ -71,7 +71,7 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 | Feature | Description |
 |---|---|
 | 🗂️ **Multi-format Upload** | Streamed, memory-bounded upload of CSV, Excel (`.xlsx`/`.xls`), and JSON. Instant schema detection, plus a bundled sample dataset if you don't have a file handy. |
-| 🧹 **Explainable Data Cleaning** | Auto-detect duplicates, missing values (two independent outlier rules — IQR and MAD), and text inconsistencies. Every suggested fix carries its statistical reasoning, nothing destructive runs by default, and every change is recorded in a step-by-step, reversible-or-not transformation log. |
+| 🧹 **Explainable Data Cleaning** | Auto-detect duplicates, missing values (two independent outlier rules — IQR and MAD), and text inconsistencies. Every suggested fix carries its statistical reasoning, nothing destructive runs by default, and every change is recorded in a step-by-step transformation log noting exactly which steps were destructive. |
 | 🤖 **Grounded, Validated Answers** | Every question is answered from a structured fact ledger LANA computes from your data, never from raw rows or the model's own recall. Every numeric claim in the answer is then checked against that ledger and flagged as verified, derived, or unsupported — with an in-app panel stating exactly what that check does and doesn't catch. |
 | 📊 **9 Chart Types** | Histogram, Line, Bar, Scatter, Box, Heatmap, Violin, Pie, Area — rendered server-side as crisp PNGs. Large datasets are drawn from a fixed, disclosed sample rather than silently getting slower. |
 | 📐 **Rigorous Statistics** | 15+ metrics per column (mean, median, std, IQR, skew, kurtosis…) with 95% confidence intervals; correlation scans corrected for multiple testing (Benjamini-Hochberg FDR) so "significant" isn't just a raw p-value. |
@@ -418,7 +418,7 @@ Restart the backend — no other changes required.
 | Export formats | CSV (streamed), PDF, DOCX — each carrying the cleaning provenance behind the numbers |
 | Chart types | 9 |
 | Statistical metrics per column | 15+, with 95% confidence intervals |
-| Cleaning operations | Dedup, null fill, dual-rule outlier detection (IQR + MAD), winsorize, text normalization — every step logged and mostly reversible |
+| Cleaning operations | Dedup, null fill, dual-rule outlier detection (IQR + MAD), winsorize, text normalization — every step logged, most non-destructive by default. Undo is switching the whole session back to the original version; there is no per-step undo. |
 | Backend test suite | 117 tests, run on every push (`pytest tests/ -q`) |
 | Data privacy | 100% — zero external network calls |
 
