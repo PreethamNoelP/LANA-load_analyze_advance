@@ -313,3 +313,82 @@ section: discrete-coded group averages appear and are labelled, a column is
 never grouped by itself, a real relationship produces a regression fact
 with the right coefficient sign and magnitude, and pure noise produces none.
 Full suite: 121 passed (was 117).
+
+---
+
+## 2026-09-05 — Catch an explicit, literal mislabeling — not the paraphrase kind
+
+**Problem.** The attribution blind spot named in the 2026-08-19 entry and
+`docs/provenance.md` is real: `validate_answer()` checks whether a *value*
+matches any fact, never whether the *label* attached to it is the one that
+fact actually belongs to. The organic failure that surfaced it — a model
+answering "59.8% work remotely" using the `remote=False` share instead of
+`remote=True` — is a natural-language attribution problem in the general
+case: the model's sentence never wrote the literal category value at all,
+it paraphrased it ("work remotely" vs. the boolean's actual `True`/`False`).
+Solving that in general needs real language understanding, which is exactly
+the kind of thing this project has deliberately avoided bolting on as a
+fragile heuristic or an extra LLM call dressed up as ground truth.
+
+**What was actually tractable.** A narrower, honestly-scoped version of the
+same check *is* deterministic: when the model's answer explicitly names a
+*different, literal* category value near the number than the one the
+matched fact belongs to — not a paraphrase, the actual value — that's a
+real, checkable signal.
+
+**Solution.**
+- `Fact` (`app/llm/context.py`) gained three optional fields: `category`
+  (the literal level value a fact is scoped to), `category_column` (the
+  column that level belongs to — for a group-by fact this differs from
+  `column`, which is the value being averaged), and `family` (groups every
+  fact that is a direct alternative to this one: same statistic, same
+  columns, different category). Populated at all four places a category-
+  scoped fact is created: per-column category/discrete-code counts,
+  category-breakdown percentages, and group-by means/totals.
+- `validate_answer()` (`app/llm/validation.py`) now runs `_attribution_check`
+  on every value-matched fact that has a `family`: it looks in an 80-
+  characters-before / 40-after window around the matched number for a
+  *sibling* fact's category named literally, while the matched fact's own
+  category is never named in that same window. Only flags when the correct
+  label is absent and a wrong one is present — a sentence that names both
+  (a legitimate comparison, "north is $267 vs south's $190") is left alone
+  on purpose, since that's exactly the case where flagging would be wrong.
+  A new `misattributed` status sits alongside verified/derived/unsupported
+  and does not count toward `verified_count` — it produces its own warning
+  naming exactly which sibling was implicated.
+
+**Why this approach.** Tested against the actual documented failure first:
+a literal-value version of it ("...records have remote=False" for what is
+actually the True share) is caught; the real paraphrased original is not,
+and is not claimed to be. `VERIFIED_CLAIM_TYPES`/`KNOWN_BLIND_SPOTS`
+(`app/llm/validation.py` — the single source the API, the UI panel, and
+`docs/provenance.md` all quote) were rewritten to say precisely that:
+catches an explicit wrong category name, not a paraphrase, and a
+correctly-computed number can still be discussed under the wrong column or
+category entirely without ever naming either literally. Overstating this
+check would be a worse outcome than the honest gap it replaces.
+
+**Tradeoff.** A wider text window would catch more explicit mislabelings
+that sit further from the number, at the cost of more false positives from
+unrelated mentions in a long paragraph. 80/40 characters was chosen to
+comfortably cover "the north region average is $267" and "$267 in the
+north region" without reaching into a neighbouring sentence; not tuned
+against a labelled corpus, since none exists for this specific pattern yet.
+
+**Tests.** Added 5 tests to `tests/test_data_science.py`: an explicit wrong
+boolean label is caught, the correctly-labelled side is accepted, a
+same-sentence two-sided comparison is correctly left alone, the same check
+works for a group-by mean (not just a category share), and — the one that
+matters most for honesty — a paraphrased mislabel ("work remotely") is
+confirmed to still pass as verified, demonstrating the documented boundary
+rather than asserting it. Full suite: 126 passed (was 121).
+
+**Not yet done.** This was not re-run against the live `eval/` harness (it
+would need a fresh Ollama session and 40 real model calls); the deterministic
+tests above are the same tier of evidence the validator's original
+adversarial suite (`eval/adversarial.py`) uses to measure precision/recall
+in isolation, which is the right tier for a change entirely inside
+`validate_answer()`'s own logic rather than model behaviour. Worth a live
+`python -m eval.run` at some point to see whether real model answers ever
+produce an explicit literal mislabeling in practice, or whether the
+paraphrase case dominates in the wild.

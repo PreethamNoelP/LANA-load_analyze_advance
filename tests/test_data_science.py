@@ -451,6 +451,77 @@ def test_validation_flags_a_fabricated_figure(sales_df):
     assert "do not match any statistic" in result.warnings[0]
 
 
+def test_validation_catches_an_explicit_wrong_boolean_label():
+    # The organic eval failure this generalises (docs/engineering-changelog.md,
+    # 2026-08-19): a model quoted a real fact's number while naming the OTHER
+    # side of a two-way split. 40.0% is remote=True's share; the answer
+    # explicitly names the wrong side, "False", and never says "True".
+    df = pd.DataFrame({"remote": [True] * 40 + [False] * 60})
+    context = build_context(df)
+    result = validate_answer("40.0% of records have remote=False.", context)
+    assert result.misattributed_count == 1
+    assert result.verified_count == 0
+    assert result.trustworthy is False
+    assert "misattributed" in result.warnings[0]
+
+
+def test_validation_accepts_the_correctly_labelled_side():
+    df = pd.DataFrame({"remote": [True] * 40 + [False] * 60})
+    context = build_context(df)
+    result = validate_answer("60.0% of records have remote=False.", context)
+    assert result.verified_count == 1
+    assert result.misattributed_count == 0
+    assert result.trustworthy is True
+
+
+def test_validation_does_not_flag_a_legitimate_two_sided_comparison():
+    # Both sides named in the same breath — the correct label for each
+    # number is present, so this must not be treated as a mismatch.
+    df = pd.DataFrame({"remote": [True] * 40 + [False] * 60})
+    context = build_context(df)
+    result = validate_answer(
+        "remote=True accounts for 40.0%, while remote=False accounts for 60.0%.",
+        context,
+    )
+    assert result.misattributed_count == 0
+    assert result.verified_count == 2
+
+
+def test_validation_catches_a_wrong_group_label_too():
+    # Same check, for a group-by mean rather than a category share. Values
+    # vary within each region (not a constant) so the group mean doesn't
+    # trivially collide with the column's own overall min/max/mean.
+    r = np.random.default_rng(42)
+    df = pd.DataFrame({
+        "region": ["north"] * 50 + ["south"] * 50,
+        "revenue": list(300 + r.normal(0, 15, 50)) + list(100 + r.normal(0, 15, 50)),
+    })
+    context = build_context(df)
+    north_mean = next(
+        f.value for f in context.facts if f.label == "mean revenue for region=north"
+    )
+    result = validate_answer(
+        f"The average revenue in the south region is {north_mean:.2f}.", context
+    )
+    assert result.misattributed_count == 1
+    warning = next(w for w in result.warnings if "misattributed" in w)
+    assert "north" in warning
+
+
+def test_validation_cannot_catch_a_paraphrased_mislabel():
+    # The honest, documented boundary (KNOWN_BLIND_SPOTS): this check matches
+    # literal category names near the number, not a paraphrase. "work
+    # remotely" never spells out "True" or "False", so a value correctly
+    # extracted but attached to the wrong side by paraphrase alone still
+    # reads as verified — the exact residual gap the docs now name explicitly
+    # instead of silently missing.
+    df = pd.DataFrame({"remote": [True] * 40 + [False] * 60})
+    context = build_context(df)
+    result = validate_answer("40.0% of employees work remotely.", context)
+    assert result.misattributed_count == 0
+    assert result.verified_count == 1
+
+
 def test_validation_ignores_prose_numbers(sales_df):
     context = build_context(sales_df)
     result = validate_answer("There are 3 key findings, driven by 2 factors.", context)

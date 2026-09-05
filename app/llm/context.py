@@ -88,11 +88,26 @@ def estimate_tokens(text: str) -> int:
 
 @dataclass
 class Fact:
-    """One verifiable numeric claim derived from the data."""
+    """One verifiable numeric claim derived from the data.
+
+    ``category``/``category_column``/``family`` are set only for a fact that
+    is scoped to one specific level of a column (e.g. "share of remote=False"
+    or "mean revenue for region=north") — ``category`` is the literal level
+    value, ``category_column`` is the column it's a level of (which may
+    differ from ``column``: a group-by fact's ``column`` is the value being
+    averaged, its ``category_column`` is the column it was grouped by), and
+    ``family`` groups every fact that is a direct alternative to this one —
+    same statistic, same columns, different category — so the validator can
+    tell whether a matched value has siblings a mislabeled answer could have
+    confused it with (see validation.py's attribution check).
+    """
 
     label: str
     value: float
     column: str | None = None
+    category: str | None = None
+    category_column: str | None = None
+    family: str | None = None
 
 
 @dataclass
@@ -304,7 +319,10 @@ def _describe_column(
         elif p.discrete_code:
             vocabulary.update(str(v) for v, _ in p.top_values)
             for value, count in p.top_values:
-                facts.append(Fact(f"count of {name}={value}", float(count), column=name))
+                facts.append(Fact(
+                    f"count of {name}={value}", float(count), column=name,
+                    category=str(value), category_column=name, family=f"count::{name}",
+                ))
             levels = ", ".join(f"{v} ({c:,})" for v, c in p.top_values)
             note = (
                 f" [encoded category, not a measurement — value counts: {levels}]"
@@ -329,7 +347,10 @@ def _describe_column(
     shown = p.top_values[:MAX_CATEGORIES_PER_COLUMN]
     vocabulary.update(str(v) for v, _ in shown)
     for value, count in shown:
-        facts.append(Fact(f"count of {name}={value}", float(count), column=name))
+        facts.append(Fact(
+            f"count of {name}={value}", float(count), column=name,
+            category=str(value), category_column=name, family=f"count::{name}",
+        ))
     listed = ", ".join(f"{value} ({count:,})" for value, count in shown)
     more = f", +{p.unique - len(shown)} rarer" if p.unique > len(shown) else ""
     return f"- '{name}' (categorical): {p.unique:,} distinct — {listed}{more}. {missing}."
@@ -354,7 +375,10 @@ def _category_breakdowns(
             vocabulary.add(label)
             pct = count / total * 100 if total else 0
             parts.append(f"{label}={count:,} ({pct:.1f}%)")
-            facts.append(Fact(f"share of {name}={label} in percent", round(pct, 1), column=name))
+            facts.append(Fact(
+                f"share of {name}={label} in percent", round(pct, 1), column=name,
+                category=label, category_column=name, family=f"share_pct::{name}",
+            ))
         lines.append(f"- '{name}': " + "; ".join(parts))
     return lines
 
@@ -410,9 +434,14 @@ def _group_summaries(
                 label = str(level)
                 mean_val = float(row["mean"])
                 parts.append(f"{label}: mean {_fmt(mean_val)} (n={int(row['count']):,})")
-                facts.append(Fact(f"mean {num} for {cat}={label}", round(mean_val, 6), column=num))
-                facts.append(Fact(f"total {num} for {cat}={label}",
-                                  round(float(row["sum"]), 6), column=num))
+                facts.append(Fact(
+                    f"mean {num} for {cat}={label}", round(mean_val, 6), column=num,
+                    category=label, category_column=cat, family=f"mean::{num}_by::{cat}",
+                ))
+                facts.append(Fact(
+                    f"total {num} for {cat}={label}", round(float(row["sum"]), 6), column=num,
+                    category=label, category_column=cat, family=f"total::{num}_by::{cat}",
+                ))
             best, worst = grouped.index[0], grouped.index[-1]
             note = " [encoded scale — average is illustrative, not a continuous measurement]" if is_discrete else ""
             lines.append(

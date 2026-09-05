@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .context import GroundedContext
+from .context import Fact, GroundedContext
 
 # ── What this layer verifies, and what it does not ──────────────────────────
 # Stated once, here, so the API and the "what LANA checks" panel in the UI
@@ -39,13 +39,22 @@ VERIFIED_CLAIM_TYPES = (
     "rounding tolerance (2% relative).",
     "A quoted or backticked column or category name that does not exist in "
     "this dataset is caught as an unknown reference.",
+    "For a number that belongs to one specific category of a column (a "
+    "share-of-category percentage, a count, or a group-by mean/total): the "
+    "text near that number does not explicitly name a *different* category "
+    "of the same statistic while omitting the correct one.",
 )
 
 KNOWN_BLIND_SPOTS = (
-    "A real, correctly-computed number attached to the wrong label — for "
-    "example, quoting the right figure but naming the wrong column or "
-    "category. This checks whether a VALUE matches any fact, not whether "
-    "the LABEL attached to it is the one that fact actually belongs to.",
+    "A real, correctly-computed number attached to the wrong label, where "
+    "the mislabeling is a paraphrase rather than an explicit category name — "
+    "for example, describing a boolean column's False-share number using "
+    "words like 'not remote' rather than literally writing 'False'. The "
+    "attribution check above only catches an explicit, literal wrong "
+    "category name near the number; it cannot recognise a paraphrase, and a "
+    "correctly-computed number can still be discussed using the wrong "
+    "column or category entirely (not just the wrong level of the right "
+    "one) without ever naming either literally.",
     "A wrong-but-plausible value that happens to fall inside a column's "
     "observed range. It is marked 'derived' rather than flagged, because a "
     "legitimate calculation can land anywhere in that range too.",
@@ -104,6 +113,13 @@ _MAX_ANSWER_CHARS = 100_000
 # by name — cheap to check and a common hallucination site.
 _REFERENCE_PATTERN = re.compile(r"[`'\"]([A-Za-z_][\w \-/]{0,48})[`'\"]")
 
+# How far around a matched number to look for the category it's actually
+# labelled with. Wide enough to cover "the north region average is $267" (the
+# category named before the number) and "$267 in the north region" (named
+# after), without spanning into an unrelated neighbouring sentence.
+_ATTRIBUTION_WINDOW_BEFORE = 80
+_ATTRIBUTION_WINDOW_AFTER = 40
+
 
 @dataclass
 class NumericClaim:
@@ -111,13 +127,16 @@ class NumericClaim:
 
     text: str
     value: float
-    status: str                       # verified | derived | unsupported
+    status: str                       # verified | derived | unsupported | misattributed
     matched_fact: str | None = None
+    note: str | None = None           # why, for a misattributed claim
 
     def to_dict(self) -> dict[str, Any]:
         out = {"text": self.text, "value": self.value, "status": self.status}
         if self.matched_fact:
             out["matched_fact"] = self.matched_fact
+        if self.note:
+            out["note"] = self.note
         return out
 
 
@@ -138,6 +157,10 @@ class ValidationResult:
         return sum(1 for c in self.claims if c.status == "unsupported")
 
     @property
+    def misattributed_count(self) -> int:
+        return sum(1 for c in self.claims if c.status == "misattributed")
+
+    @property
     def trustworthy(self) -> bool:
         return not self.warnings
 
@@ -147,6 +170,7 @@ class ValidationResult:
             "numbers_checked": len(self.claims),
             "verified": self.verified_count,
             "unsupported": self.unsupported_count,
+            "misattributed": self.misattributed_count,
             "unknown_references": list(self.unknown_references),
             "warnings": list(self.warnings),
             "claims": [c.to_dict() for c in self.claims],
@@ -166,6 +190,54 @@ def _matches(value: float, target: float) -> bool:
     if target == 0:
         return abs(value) <= _ABS_TOLERANCE
     return abs(value - target) <= max(_ABS_TOLERANCE, abs(target) * _REL_TOLERANCE)
+
+
+def _mentions(window: str, token: str | None) -> bool:
+    """Whole-word, case-insensitive check for a literal token in a text window."""
+    if not token:
+        return False
+    return re.search(rf"\b{re.escape(token)}\b", window, re.IGNORECASE) is not None
+
+
+def _attribution_check(
+    fact: Fact,
+    context: GroundedContext,
+    answer: str,
+    start: int,
+    end: int,
+) -> str | None:
+    """Look for an explicit, differently-labelled sibling near a matched number.
+
+    Returns a note describing the mismatch when the text names a *different*
+    category of the same statistic (e.g. a different region, or the other
+    side of a boolean) near the number, while never naming the category the
+    matched fact actually belongs to. Returns None otherwise — including
+    when the fact isn't part of any family (a plain column statistic has
+    nothing to be confused with), and when the text is ambiguous rather than
+    pointing at a specific wrong answer (both the correct and an incorrect
+    category are named nearby, as a legitimate comparison would).
+    """
+    if not fact.family:
+        return None
+    siblings = [
+        f for f in context.facts
+        if f.family == fact.family and f.category != fact.category
+    ]
+    if not siblings:
+        return None
+
+    window = answer[max(0, start - _ATTRIBUTION_WINDOW_BEFORE):
+                     min(len(answer), end + _ATTRIBUTION_WINDOW_AFTER)]
+    if _mentions(window, fact.category):
+        return None  # the correct label is right there too — not a clean case
+
+    wrong = next((s for s in siblings if _mentions(window, s.category)), None)
+    if wrong is None:
+        return None
+    return (
+        f"the text names '{wrong.category}' near this number, but it matches "
+        f"{fact.label} (category '{fact.category}')"
+    )
 
 
 def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
@@ -195,8 +267,10 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
             (fact for fact in context.facts if _matches(value, fact.value)), None
         )
         if matched is not None:
+            note = _attribution_check(matched, context, answer, match.start(), match.end())
+            status = "misattributed" if note else "verified"
             result.claims.append(
-                NumericClaim(raw, value, "verified", matched_fact=matched.label)
+                NumericClaim(raw, value, status, matched_fact=matched.label, note=note)
             )
             continue
 
@@ -224,6 +298,13 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
             result.unknown_references.append(token)
 
     # ── Warnings: only what a user genuinely needs to see ────────────────────
+    misattributed = [c for c in result.claims if c.status == "misattributed"]
+    if misattributed:
+        for claim in misattributed[:4]:
+            result.warnings.append(
+                f"'{claim.text}' looks misattributed: {claim.note}."
+            )
+
     unsupported = [c for c in result.claims if c.status == "unsupported"]
     if unsupported:
         preview = ", ".join(c.text for c in unsupported[:4])
