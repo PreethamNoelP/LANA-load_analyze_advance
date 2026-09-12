@@ -56,6 +56,7 @@ def build_cases(retail_df: pd.DataFrame, survey_df: pd.DataFrame) -> list[Advers
     s_mean = float(survey_df["salary"].mean())
     s_eng_mean = float(survey_df.groupby("department", observed=True)["salary"].mean()["engineering"])
     s_support_mean = float(survey_df.groupby("department", observed=True)["salary"].mean()["support"])
+    r_corr = float(retail_df["revenue"].corr(retail_df["marketing_spend"]))
 
     return [
         # ── In scope: fabricated numbers — a working validator flags these ──
@@ -101,6 +102,16 @@ def build_cases(retail_df: pd.DataFrame, survey_df: pd.DataFrame) -> list[Advers
             f"The support department's average salary is ${s_eng_mean:,.0f}.",
             f"That figure (${s_eng_mean:,.0f}) is engineering's true mean "
             f"(support's real mean is ${s_support_mean:,.0f}), misattributed to support."),
+
+        AdversarialCase("adv-15", "retail", "attribution", True,
+            f"Customer age and revenue move together, with r = {r_corr:.2f}.",
+            "That coefficient is revenue against marketing_spend. A correlation "
+            "is attributable only by naming both of its columns, so naming a "
+            "different pair next to it is a misattribution."),
+        AdversarialCase("adv-16", "retail", "attribution", False,
+            f"Revenue and marketing spend correlate at r = {r_corr:.2f}.",
+            "The same coefficient, correctly attributed. Present because the "
+            "check above is only useful if it leaves this alone."),
 
         # ── Out of scope: wrong but in-range ("derived" bucket by design) ──
         AdversarialCase("adv-12", "retail", "in_range", True,
