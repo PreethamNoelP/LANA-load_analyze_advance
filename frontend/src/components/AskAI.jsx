@@ -83,7 +83,7 @@ function Message({ msg }) {
           <span style={{ animation: 'lana-pulse 1.2s ease-in-out infinite' }}>●</span>
           Thinking…
         </div>
-      ) : msg.error ? (
+      ) : msg.error && !msg.a ? (
         <div style={{
           marginLeft: 34, borderLeft: '2px solid var(--red)',
           paddingLeft: 16, color: 'var(--red)', fontSize: 13,
@@ -101,25 +101,58 @@ function Message({ msg }) {
         }}>
           {msg.a}
 
-          {/* Trust verdict — the answer's figures were checked against the
-              statistics LANA actually computed. Only failures are shown. */}
-          {msg.validation?.warnings?.length > 0 && (
+          {/* The stream failed partway. The text above is real and was already
+              read, so it stays — but it is not a complete answer and was never
+              validated, and saying so is the whole point. */}
+          {msg.truncated && (
             <div style={{
               marginTop: 14, padding: '11px 14px',
-              background: 'rgba(240,180,60,0.08)',
-              border: '1px solid rgba(240,180,60,0.28)',
+              background: 'rgba(224,82,82,0.08)',
+              border: '1px solid rgba(224,82,82,0.28)',
               borderRadius: 8, fontSize: 12.5, lineHeight: 1.6,
-              color: 'var(--amber)', whiteSpace: 'normal',
+              color: 'var(--red)', whiteSpace: 'normal',
             }}>
-              <div style={{ fontWeight: 700, marginBottom: 5 }}>⚠ Unverified figures</div>
-              {msg.validation.warnings.map((w, i) => (
-                <div key={i} style={{ marginTop: i > 0 ? 5 : 0 }}>{w}</div>
-              ))}
-              <div style={{ marginTop: 7, fontSize: 11, opacity: 0.75, fontFamily: 'var(--ff-mono)' }}>
-                {msg.validation.verified} of {msg.validation.numbers_checked} numbers matched a computed statistic
+              <div style={{ fontWeight: 700, marginBottom: 5 }}>⚠ Response cut off</div>
+              <div>{msg.error}</div>
+              <div style={{ marginTop: 5 }}>
+                The text above is only part of an answer and was not checked
+                against your data. Ask again for a complete, verified response.
               </div>
             </div>
           )}
+
+          {/* Trust verdict — the answer's figures were checked against the
+              statistics LANA actually computed. Only failures are shown.
+              Misattribution is called out separately from fabrication: a
+              number that exists but is labelled wrong is a different problem
+              from one that exists nowhere in the data. */}
+          {msg.validation?.warnings?.length > 0 && (() => {
+            const misattributed = msg.validation.misattributed || 0
+            const unsupported = msg.validation.unsupported || 0
+            const heading = misattributed && !unsupported
+              ? '⚠ Figure may be labelled wrong'
+              : misattributed
+                ? '⚠ Unverified and mislabelled figures'
+                : '⚠ Unverified figures'
+            return (
+              <div style={{
+                marginTop: 14, padding: '11px 14px',
+                background: 'rgba(240,180,60,0.08)',
+                border: '1px solid rgba(240,180,60,0.28)',
+                borderRadius: 8, fontSize: 12.5, lineHeight: 1.6,
+                color: 'var(--amber)', whiteSpace: 'normal',
+              }}>
+                <div style={{ fontWeight: 700, marginBottom: 5 }}>{heading}</div>
+                {msg.validation.warnings.map((w, i) => (
+                  <div key={i} style={{ marginTop: i > 0 ? 5 : 0 }}>{w}</div>
+                ))}
+                <div style={{ marginTop: 7, fontSize: 11, opacity: 0.75, fontFamily: 'var(--ff-mono)' }}>
+                  {msg.validation.verified} of {msg.validation.numbers_checked} numbers matched a computed statistic
+                  {misattributed > 0 && ` · ${misattributed} matched a different label than the text claims`}
+                </div>
+              </div>
+            )
+          })()}
 
           <div style={{
             marginTop: 10, fontSize: 11,

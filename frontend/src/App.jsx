@@ -44,6 +44,8 @@ export default function App() {
   const [hasCleanedData, setHasCleanedData] = useState(false)
   const [llmStatus, setLlmStatus] = useState(null)
   const [restoring, setRestoring] = useState(true)
+  const [restoreError, setRestoreError] = useState(null)
+  const [retryToken, setRetryToken] = useState(0)
 
   // AskAI state — lifted here so messages survive tab switches
   // and so we can control the fixed-input / scrollable-messages split
@@ -72,9 +74,14 @@ export default function App() {
 
   // Restore a session across a page refresh. Only the id survived the
   // reload; everything else (rows, columns, cleaning state) is re-fetched so
-  // the browser never shows stale data the backend has since moved past. If
-  // the session was evicted (LRU/TTL) the backend 404s and this just falls
-  // through to the normal Upload screen.
+  // the browser never shows stale data the backend has since moved past.
+  //
+  // The two failure modes are deliberately NOT treated the same. A 404 means
+  // the backend genuinely no longer has this session (LRU/TTL eviction), so
+  // the stored id is dead and forgetting it is correct. Anything else — the
+  // backend still starting up, a dropped connection, a timeout — means the
+  // session may well be alive, and discarding the only pointer to it would
+  // lose the user's work for a reason that had nothing to do with them.
   useEffect(() => {
     const storedId = sessionStorage.getItem(SESSION_ID_KEY)
     if (!storedId) { setRestoring(false); return }
@@ -84,16 +91,57 @@ export default function App() {
         setCleanVersion(info.version || 'original')
         setHasCleanedData(!!info.has_cleaned)
         setView('app')
+        setRestoreError(null)
       })
-      .catch(() => sessionStorage.removeItem(SESSION_ID_KEY))
+      .catch(e => {
+        if (e?.status === 404) {
+          sessionStorage.removeItem(SESSION_ID_KEY)
+          setRestoreError(null)
+        } else {
+          setRestoreError(e?.message || 'Could not reach the LANA backend.')
+        }
+      })
       .finally(() => setRestoring(false))
-  }, [])
+  }, [retryToken])
+
+  // Keep the active data version in step with the server. `active_version`
+  // is one field per session on the backend, shared by every endpoint — but
+  // this component holds its own copy, so a second tab (or a switch made
+  // elsewhere) could leave the badge claiming "Original" while every stats,
+  // chart and AI answer was really being computed against the cleaned frame.
+  // Re-reading on focus costs one small request and removes that whole class
+  // of silently-mislabelled results.
+  useEffect(() => {
+    // Captured rather than read off `session` inside the handler: the effect
+    // is keyed on the id, so closing over the whole object would let a later
+    // render's session leak into a listener registered for an earlier one.
+    const sessionId = session?.session_id
+    if (!sessionId) return
+    function resync() {
+      if (document.visibilityState !== 'visible') return
+      getSessionInfo(sessionId)
+        .then(info => {
+          setSession(cur =>
+            cur?.session_id === info.session_id ? { ...cur, ...info } : cur)
+          setCleanVersion(info.version || 'original')
+          setHasCleanedData(!!info.has_cleaned)
+        })
+        .catch(() => {})   // a failed resync just leaves the last known state
+    }
+    document.addEventListener('visibilitychange', resync)
+    window.addEventListener('focus', resync)
+    return () => {
+      document.removeEventListener('visibilitychange', resync)
+      window.removeEventListener('focus', resync)
+    }
+  }, [session?.session_id])
 
   // Reset per-session state when a new dataset is loaded
   useEffect(() => {
+    const sessionId = session?.session_id
     setAiMessages([])
     setAiInput('')
-    if (session) sessionStorage.setItem(SESSION_ID_KEY, session.session_id)
+    if (sessionId) sessionStorage.setItem(SESSION_ID_KEY, sessionId)
   }, [session?.session_id])
 
   // Auto-scroll the AI thread to the latest message
@@ -123,8 +171,8 @@ export default function App() {
     setAiLoading(true)
     const id = Date.now()
     setAiMessages(prev => [...prev, { id, q: question, loading: true }])
+    let answer = ''
     try {
-      let answer = ''
       let validation = null
       for await (const evt of streamQuery(session.session_id, question)) {
         if (evt.type === 'delta') answer += evt.text
@@ -138,7 +186,15 @@ export default function App() {
       setAiMessages(prev => prev.map(m =>
         m.id === id ? { ...m, loading: false, a: answer, validation } : m))
     } catch (e) {
-      setAiMessages(prev => prev.map(m => m.id === id ? { ...m, loading: false, error: e.message } : m))
+      // Keep whatever already streamed in. The user has been reading it as it
+      // arrived; replacing a near-complete answer with a bare error message
+      // because the last chunk failed throws away the part that was fine. The
+      // answer is marked truncated so it is never mistaken for a full one —
+      // and deliberately carries no validation verdict, since a partial answer
+      // was never checked against the facts.
+      setAiMessages(prev => prev.map(m => m.id === id
+        ? { ...m, loading: false, a: answer, truncated: Boolean(answer), error: e.message }
+        : m))
     } finally {
       setAiLoading(false)
     }
@@ -146,8 +202,47 @@ export default function App() {
 
   // Brief gate while a stored session id is checked against the backend, so
   // a returning user doesn't see the marketing Landing page flash before
-  // being dropped back into their dataset.
-  if (restoring) return <div style={s.bootScreen} />
+  // being dropped back into their dataset. It says what it is doing: this
+  // used to be an empty div, which on a stalled connection was an
+  // indistinguishable-from-broken blank page.
+  if (restoring) {
+    return (
+      <div style={s.bootScreen}>
+        <div style={s.bootText}>Restoring your session…</div>
+      </div>
+    )
+  }
+
+  // The session may still exist on a backend we simply couldn't reach, so the
+  // id is kept and the user is offered a retry rather than being silently
+  // dropped back to Upload having lost the reference to their work.
+  if (restoreError) {
+    return (
+      <div style={s.bootScreen}>
+        <div style={s.bootCard}>
+          <div style={s.bootTitle}>Couldn't reach the LANA backend</div>
+          <div style={s.bootBody}>{restoreError}</div>
+          <div style={s.bootBody}>
+            Your dataset may still be loaded on the server. Check that the
+            backend is running, then try again.
+          </div>
+          <div style={s.bootActions}>
+            <button
+              style={s.bootPrimary}
+              onClick={() => { setRestoreError(null); setRestoring(true); setRetryToken(t => t + 1) }}
+            >Try again</button>
+            <button
+              style={s.bootSecondary}
+              onClick={() => {
+                sessionStorage.removeItem(SESSION_ID_KEY)
+                setRestoreError(null)
+              }}
+            >Start fresh</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   if (view === 'landing') return <Landing onTry={() => setView('app')} />
 
@@ -240,7 +335,11 @@ export default function App() {
                 {previewOpen && <div style={{ marginTop: 16 }}><DataPreview preview={session.preview} columns={session.columns} /></div>}
                 {aiMessages.length === 0 && (
                   <div style={{ marginTop: 16 }}>
-                    <Recommendations sessionId={session.session_id} onGoTo={setTab} />
+                    <Recommendations
+                      key={session.session_id}
+                      sessionId={session.session_id}
+                      onGoTo={setTab}
+                    />
                   </div>
                 )}
                 <div style={{ marginTop: 20 }}>
@@ -305,6 +404,7 @@ export default function App() {
               {previewOpen && <div style={{ marginTop: 16 }}><DataPreview preview={session.preview} columns={session.columns} /></div>}
               <div style={{ marginTop: 24, display: tab === 'clean' ? 'block' : 'none' }}>
                 <Clean
+                  key={session.session_id}
                   session={session}
                   cleanVersion={cleanVersion}
                   hasCleanedData={hasCleanedData}
@@ -332,7 +432,27 @@ export default function App() {
 
 /* ── Styles ─────────────────────────────────────────────────────────────────── */
 const s = {
-  bootScreen: { height: '100vh', background: 'var(--bg)' },
+  bootScreen: {
+    height: '100vh', background: 'var(--bg)', display: 'flex',
+    alignItems: 'center', justifyContent: 'center', padding: 24,
+  },
+  bootText: { fontSize: 13, color: 'var(--muted)' },
+  bootCard: {
+    maxWidth: 420, textAlign: 'center', padding: '28px 30px',
+    background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12,
+  },
+  bootTitle: { fontSize: 16, fontWeight: 700, color: 'var(--text)', marginBottom: 10 },
+  bootBody: { fontSize: 13, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 10 },
+  bootActions: { display: 'flex', gap: 10, justifyContent: 'center', marginTop: 18 },
+  bootPrimary: {
+    padding: '9px 20px', fontSize: 13, fontWeight: 600, color: '#fff',
+    background: 'var(--accent)', border: 'none', borderRadius: 8, cursor: 'pointer',
+  },
+  bootSecondary: {
+    padding: '9px 20px', fontSize: 13, fontWeight: 600, color: 'var(--muted)',
+    background: 'transparent', border: '1px solid var(--border)',
+    borderRadius: 8, cursor: 'pointer',
+  },
   layout:  { display: 'flex', height: '100vh', overflow: 'hidden' },
   main:    { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', marginLeft: 'var(--sidebar)' },
 
