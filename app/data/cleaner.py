@@ -23,6 +23,7 @@ from .outliers import (
     annotate_outliers,
     detect_outliers,
     iqr_mask,
+    too_few_points,
     winsorize_column,
 )
 from .profile import ColumnKind, profile_dataframe, suggest_imputation
@@ -436,6 +437,11 @@ def _op_flag_outliers(
     op: dict,
 ) -> pd.DataFrame:
     method = op.get("outlier_method") or "modified_zscore"
+    too_small = too_few_points(df[col])
+    if too_small:
+        ledger.skip("flag_outliers", col, too_small)
+        return df
+
     try:
         result, details = annotate_outliers(df, col, method=method)
     except (ValueError, KeyError) as exc:
@@ -460,6 +466,11 @@ def _op_flag_outliers(
 
 
 def _op_winsorize(df: pd.DataFrame, ledger: CleaningLedger, col: str) -> pd.DataFrame:
+    too_small = too_few_points(df[col])
+    if too_small:
+        ledger.skip("winsorize", col, too_small)
+        return df
+
     try:
         result, details = winsorize_column(df, col)
     except (ValueError, KeyError) as exc:
@@ -498,6 +509,14 @@ def _op_remove_outliers(df: pd.DataFrame, ledger: CleaningLedger, col: str) -> p
         ledger.skip("remove_outliers", col,
                     f"'{col}' is not a continuous numeric measurement "
                     f"({'encoded category' if p.discrete_code else p.kind.value}).")
+        return df
+
+    # Deleting rows on fences the detection rules themselves call meaningless
+    # is the worst version of this disagreement: the preview reports "not
+    # applicable" while cleaning silently discards data on that same basis.
+    too_small = too_few_points(df[col])
+    if too_small:
+        ledger.skip("remove_outliers", col, too_small)
         return df
 
     mask, lower, upper = iqr_mask(df[col])

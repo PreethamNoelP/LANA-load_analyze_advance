@@ -143,6 +143,33 @@ def test_outlier_analysis_is_refused_on_rating_codes(sales_df):
         annotate_outliers(sales_df, "rating")
 
 
+@pytest.mark.parametrize("operation", ["remove_outliers", "flag_outliers", "winsorize"])
+def test_outlier_operations_refuse_a_sample_too_small_to_judge(operation):
+    # Regression: detect_outliers (the preview path) refuses below MIN_POINTS
+    # because quantiles are meaningless there, but the apply path had no such
+    # guard — so /clean/preview reported "not applicable" for a column while
+    # /clean/apply went ahead and deleted 20% of the rows using fences built
+    # from those same five points.
+    df = pd.DataFrame({"value": [10.0, 11.0, 12.0, 13.0, 900.0]})
+    assert detect_outliers(df["value"]).recommended_action == "not_applicable"
+
+    cleaned, ledger = apply_cleaning(df, [{"type": operation, "column": "value"}])
+
+    assert len(cleaned) == len(df), "no row may be dropped on an unusable sample"
+    assert ledger.records == [], "nothing should be recorded as applied"
+    assert len(ledger.skipped) == 1
+    assert "too unstable" in ledger.skipped[0]["reason"]
+
+
+def test_outlier_removal_still_applies_above_the_threshold():
+    # The guard must refuse small samples without disabling the feature.
+    df = pd.DataFrame({"value": [10.0, 11, 12, 13, 11, 10, 12, 13, 11, 12, 900]})
+    cleaned, ledger = apply_cleaning(df, [{"type": "remove_outliers", "column": "value"}])
+
+    assert len(cleaned) == len(df) - 1
+    assert [r.operation for r in ledger.records] == ["remove_outliers"]
+
+
 def test_winsorize_caps_values_and_keeps_a_backup(sales_df):
     result, details = winsorize_column(sales_df, "revenue")
     assert len(result) == len(sales_df)

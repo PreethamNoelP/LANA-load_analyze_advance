@@ -123,6 +123,25 @@ def _numeric_values(series: pd.Series) -> pd.Series:
     return series.dropna().astype("float64")
 
 
+def too_few_points(series: pd.Series) -> str | None:
+    """Why this column is too small for outlier analysis, or None if it's fine.
+
+    :func:`detect_outliers` — the preview path — already refuses below
+    ``MIN_POINTS``. Exposing the same check lets the *apply* path refuse for
+    the identical reason, so the preview cannot report "not applicable" for a
+    column that cleaning then goes ahead and deletes rows from anyway. The
+    threshold lives here, with the rules it protects, rather than being
+    restated by each caller.
+    """
+    n = int(_numeric_values(series).size)
+    if n < MIN_POINTS:
+        return (
+            f"Only {n} non-null value(s). Below {MIN_POINTS} points, quantiles "
+            "are too unstable for outlier detection to mean anything."
+        )
+    return None
+
+
 def iqr_mask(series: pd.Series, multiplier: float = IQR_MULTIPLIER) -> tuple[pd.Series, float, float]:
     """Boolean mask of Tukey-fence outliers, aligned to ``series``' index.
 
