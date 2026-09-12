@@ -361,11 +361,18 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
             "any statistic LANA computed and fall outside every column's observed "
             "range. Verify them against the data before using them."
         )
-    if len(result.unknown_references) > 2:
-        preview = ", ".join(result.unknown_references[:4])
+    # Any explicitly quoted name that isn't in the data is worth surfacing.
+    # This used to require more than two before it said anything, so an answer
+    # inventing a single plausible-sounding segment ("Revenue is highest in the
+    # 'enterprise' segment") passed silently — the exact case eval/adversarial
+    # adv-04 describes. The threshold was protecting against noise from the
+    # model quoting ordinary words, which the stoplist below handles directly.
+    if result.unknown_references:
+        preview = ", ".join(f"'{r}'" for r in result.unknown_references[:4])
+        plural = "do" if len(result.unknown_references) > 1 else "does"
         result.warnings.append(
-            f"The answer refers to {preview}, which do not appear among this "
-            "dataset's column names or category values."
+            f"The answer refers to {preview}, which {plural} not appear among "
+            "this dataset's column names or category values."
         )
     if result.claims and result.verified_count == 0 and len(result.claims) >= 3:
         result.warnings.append(
@@ -376,9 +383,17 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
     return result
 
 
+# Words a model quotes while describing its own analysis rather than naming
+# something in the data. Now that a single unknown reference warns, this list
+# is what keeps that from being noisy, so it covers the statistical vocabulary
+# an answer routinely puts in quotes.
 _GENERIC_TERMS = {
     "yes", "no", "n/a", "na", "none", "null", "true", "false", "mean", "median",
     "average", "sum", "total", "count", "min", "max", "std", "the", "and", "or",
     "data", "dataset", "column", "columns", "row", "rows", "value", "values",
     "high", "low", "top", "bottom", "note", "summary", "insight", "insights",
+    "mode", "range", "iqr", "variance", "skew", "skewness", "kurtosis",
+    "outlier", "outliers", "correlation", "regression", "significant",
+    "p-value", "q-value", "confidence interval", "standard deviation",
+    "missing", "nulls", "unknown", "other", "overall", "group", "groups",
 }
