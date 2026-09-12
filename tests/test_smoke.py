@@ -463,6 +463,87 @@ def test_exports_carry_quality_and_provenance(client):
     assert client.get(f"/export/pdf/{sid}").status_code == 200
 
 
+def test_exported_report_never_averages_an_id_or_a_cleaning_annotation(client):
+    # Regression: the report's "Data Profile" block was built by the naive,
+    # dtype-only describer, so it printed "mean order_id = ..." and full stats
+    # for LANA's own __outlier/__outlier_score columns — directly contradicting
+    # the profile-filtered summary printed a few lines above it in the same
+    # file. A report is forwarded to people who never used LANA and have no way
+    # to catch that.
+    csv = b"order_id,revenue,region\n" + b"".join(
+        f"{1000 + i},{100 + i * 3}.5,{'north' if i % 2 else 'south'}\n".encode()
+        for i in range(40)
+    )
+    sid = upload(client, csv, "orders.csv")["session_id"]
+    applied = client.post(f"/clean/apply/{sid}", json={
+        "operations": [{"type": "flag_outliers", "column": "revenue"}],
+    })
+    assert applied.status_code == 200
+
+    import io as _io
+    import zipfile
+    docx = client.get(f"/export/docx/{sid}")
+    assert docx.status_code == 200
+    with zipfile.ZipFile(_io.BytesIO(docx.content)) as z:
+        xml = z.read("word/document.xml").decode("utf-8")
+
+    assert "order_id" in xml, "the column should still be described, just not averaged"
+    assert "not meaningful" in xml, "identifier should be labelled, not silently dropped"
+    assert "added by LANA's cleaning step" in xml
+    # The specific failure: an identifier's mean presented as a finding.
+    assert "mean=1019" not in xml and "mean = 1019" not in xml
+
+
+def test_naive_context_mode_stays_frozen_for_the_eval_baseline():
+    # eval/harness.py uses generate_context(df) with no profiles as the
+    # *baseline* condition its published before/after comparison is measured
+    # against. Making that mode profile-aware would silently move the baseline
+    # and make the recorded numbers incomparable, so the dual behaviour is
+    # deliberate and pinned here.
+    import numpy as np
+    import pandas as pd
+
+    from app.analysis.statistics import generate_context
+    from app.data.profile import profile_dataframe
+
+    # revenue must not be a perfect sequence, or the identifier heuristic
+    # correctly classifies it as an ID too and the test proves nothing.
+    df = pd.DataFrame({
+        "order_id": range(1000, 1060),
+        "revenue": np.random.default_rng(3).exponential(250, 60).round(2),
+    })
+
+    naive = generate_context(df)
+    aware = generate_context(df, profiles=profile_dataframe(df))
+
+    assert "mean=1030" in naive, "baseline must keep describing an ID by dtype alone"
+    assert "mean=1030" not in aware
+    assert "not meaningful" in aware
+    # The real measurement is still fully described in both modes.
+    assert "'revenue' (numeric)" in naive and "'revenue' (numeric)" in aware
+
+
+def test_report_summary_derives_profiles_when_the_caller_has_none():
+    # The guard that keeps identifiers out of the numeric summary used to be
+    # skipped entirely when profiles weren't supplied, so an alternate caller
+    # could silently regress to averaging IDs.
+    import numpy as np
+    import pandas as pd
+
+    from app.export.exporters import _numeric_summary_lines
+
+    df = pd.DataFrame({
+        "order_id": range(1000, 1060),
+        "revenue": np.random.default_rng(3).exponential(250, 60).round(2),
+    })
+    summaries, omitted = _numeric_summary_lines(df, None)
+
+    described = " ".join(headline for headline, _ in summaries)
+    assert "revenue" in described
+    assert "order_id" not in described
+    assert omitted == 0
+
+
 def test_validator_capabilities_endpoint(client):
     body = client.get("/validator/capabilities").json()
     assert body["verifies"]

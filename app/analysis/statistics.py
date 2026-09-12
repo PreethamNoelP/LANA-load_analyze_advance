@@ -402,12 +402,27 @@ def _describe_correlation(entry: dict[str, Any], method: str, tests: int) -> str
 MAX_CONTEXT_COLUMNS = 40
 
 
-def generate_context(df: pd.DataFrame) -> str:
-    """Build a text description of a DataFrame to pass as LLM context.
+def generate_context(
+    df: pd.DataFrame,
+    profiles: dict[str, Any] | None = None,
+) -> str:
+    """Build a text description of a DataFrame.
 
-    Retained for report exports and backward compatibility. The AI question
-    path uses :func:`app.llm.context.build_context`, which grounds answers in
-    a verifiable fact set rather than summary statistics alone.
+    Two deliberately different modes, because two callers need two different
+    things from this function:
+
+    * **Without ``profiles`` (the default)** it describes columns by pandas
+      dtype alone. This is the naive, pre-grounding description LANA shipped
+      before :func:`app.llm.context.build_context` existed, and ``eval/`` uses
+      it verbatim as the *baseline* condition its published comparison is
+      measured against (see ``eval/harness.py``). Changing what this mode
+      produces would silently move that baseline and make the recorded
+      before/after numbers incomparable, so it stays frozen on purpose.
+    * **With ``profiles``** it respects the same semantic column kinds the
+      rest of LANA enforces: an identifier's mean and LANA's own cleaning
+      annotations are not presented as measurements. Report exports use this
+      mode — a report is forwarded to people who never touched LANA, so
+      "mean order_id = 1150" there is a claim the reader has no way to catch.
     """
     lines = [
         f"Dataset: {len(df):,} rows x {len(df.columns)} columns.",
@@ -419,16 +434,36 @@ def generate_context(df: pd.DataFrame) -> str:
     omitted = len(df.columns) - len(detail_cols)
 
     for col in detail_cols:
+        profile = profiles.get(col) if profiles else None
+
+        if profile is not None and profile.is_annotation:
+            lines.append(
+                f"- '{col}': added by LANA's cleaning step, not part of the "
+                f"uploaded data. It records which rows were affected; it is not "
+                f"a measurement."
+            )
+            continue
+
+        if profile is not None and profile.kind is ColumnKind.IDENTIFIER:
+            lines.append(
+                f"- '{col}' (identifier): {profile.unique:,} distinct values. "
+                f"Arithmetic on it is not meaningful, so no average is reported."
+            )
+            continue
+
         if pd.api.types.is_numeric_dtype(df[col]):
             s = df[col].dropna()
             if s.empty:
                 lines.append(f"- '{col}' (numeric): all values are null.")
             else:
+                note = ""
+                if profile is not None and profile.discrete_code:
+                    note = " [encoded category, not a continuous measurement]"
                 lines.append(
                     f"- '{col}' (numeric): "
                     f"min={s.min():.4g}, max={s.max():.4g}, "
                     f"mean={s.mean():.4g}, median={s.median():.4g}, "
-                    f"std={s.std():.4g}, nulls={df[col].isnull().sum()}"
+                    f"std={s.std():.4g}, nulls={df[col].isnull().sum()}{note}"
                 )
         else:
             sample = df[col].dropna().head(5).tolist()

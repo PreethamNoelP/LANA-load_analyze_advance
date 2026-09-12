@@ -18,7 +18,7 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
 from ..analysis.statistics import compute_statistics
-from ..data.profile import ColumnProfile
+from ..data.profile import ColumnProfile, profile_dataframe
 
 # A report is a summary, not a data dump. Past this many columns the per
 # column detail stops being readable and the file stops being shareable.
@@ -37,13 +37,27 @@ def _pdf_text(text: str) -> str:
 def _numeric_summary_lines(
     df: pd.DataFrame,
     profiles: dict[str, ColumnProfile] | None,
-) -> list[tuple[str, list[str]]]:
-    """Per-column headline figures, each with its uncertainty and caveats."""
+) -> tuple[list[tuple[str, list[str]]], int]:
+    """Per-column headline figures, each with its uncertainty and caveats.
+
+    Returns ``(summaries, omitted_count)``. The count is reported rather than
+    silently dropped: a reader who cannot tell that columns were left out will
+    read the ones shown as the whole picture.
+    """
     out: list[tuple[str, list[str]]] = []
-    numeric_cols = df.select_dtypes("number").columns.tolist()[:MAX_DETAIL_COLUMNS]
+    if profiles is None:
+        # Every other module that takes an optional ``profiles`` derives it
+        # when absent (statistics._correlate, cleaner.detect_issues). Doing the
+        # same here means the identifier/annotation guard below cannot be
+        # bypassed by a caller that simply didn't have profiles to hand.
+        profiles = profile_dataframe(df)
+
+    all_numeric = df.select_dtypes("number").columns.tolist()
+    numeric_cols = all_numeric[:MAX_DETAIL_COLUMNS]
+    omitted = len(all_numeric) - len(numeric_cols)
 
     for col in numeric_cols:
-        profile = profiles.get(col) if profiles else None
+        profile = profiles.get(col)
         if profile is not None and not profile.is_numeric_measure:
             # Identifiers and LANA's own annotation columns are numeric by
             # dtype but averaging them is meaningless.
@@ -68,7 +82,7 @@ def _numeric_summary_lines(
         detail.extend(stats.get("caveats", [])[:2])
         out.append((headline, detail))
 
-    return out
+    return out, omitted
 
 
 # ── PDF ──────────────────────────────────────────────────────────────────────
@@ -136,13 +150,15 @@ def generate_pdf_report(
         pdf.ln(3)
 
     # ── Per-column figures with uncertainty ──────────────────────────────────
-    summaries = _numeric_summary_lines(df, profiles)
+    summaries, omitted = _numeric_summary_lines(df, profiles)
     if summaries:
         heading("Numeric Column Summary")
         for headline, detail in summaries:
             body(headline)
             for line in detail:
                 body(line, size=8, indent="      ")
+        if omitted:
+            body(f"(+{omitted} further numeric column(s) not detailed here.)", size=8)
         pdf.ln(3)
 
     # ── Raw profile block ────────────────────────────────────────────────────
@@ -200,13 +216,18 @@ def generate_word_report(
             if line.strip():
                 doc.add_paragraph(line.strip(), style="List Bullet")
 
-    summaries = _numeric_summary_lines(df, profiles)
+    summaries, omitted = _numeric_summary_lines(df, profiles)
     if summaries:
         doc.add_heading("Numeric Column Summary", level=1)
         for headline, detail in summaries:
             doc.add_paragraph(headline, style="List Bullet")
             for line in detail:
                 doc.add_paragraph(line, style="List Bullet 2")
+        if omitted:
+            doc.add_paragraph(
+                f"(+{omitted} further numeric column(s) not detailed here.)",
+                style="List Bullet",
+            )
 
     doc.add_heading("Data Profile", level=1)
     for line in context.splitlines():
