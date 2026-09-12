@@ -290,6 +290,50 @@ def test_no_budget_means_no_trimming():
     assert build_context(df).coverage["sections_dropped"] == []
 
 
+def test_token_reserve_covers_the_reply_the_model_is_allowed_to_write():
+    # Regression: the reserve was a flat 1200 tokens while the system prompt
+    # alone measures ~585 and the model may generate LLM_MAX_TOKENS (2048) —
+    # so a full context plus a long answer overflowed an 8192 window by ~1400
+    # tokens, causing exactly the silent front-truncation this module exists
+    # to prevent.
+    from app.llm.base import ANSWER_SYSTEM_PROMPT
+    from app.llm.context import context_token_reserve
+
+    system_tokens = estimate_tokens(ANSWER_SYSTEM_PROMPT)
+    window, max_answer = 8192, 2048
+
+    reserve = context_token_reserve(max_answer)
+    assert reserve >= system_tokens + max_answer, "reserve must cover prompt + full reply"
+
+    allowance = window - reserve
+    assert allowance + system_tokens + max_answer <= window, "worst case must fit"
+
+
+def test_reserve_tracks_a_larger_configured_reply_budget():
+    from app.llm.context import context_token_reserve
+
+    assert context_token_reserve(4096) - context_token_reserve(2048) == 2048
+
+
+def test_context_admits_when_even_the_column_list_overflows():
+    # Only the optional sections are droppable. When the per-column detail
+    # alone still exceeds the window, the context must say so rather than let
+    # the runtime silently cut facts off the front.
+    rng = np.random.default_rng(5)
+    wide = pd.DataFrame({f"measure_{i}": rng.normal(size=200) for i in range(30)})
+
+    ctx = build_context(wide, token_budget=3_000, max_answer_tokens=2048)
+
+    assert ctx.coverage["over_budget"] is True
+    assert "exceeds the space available" in ctx.text
+
+
+def test_a_comfortable_budget_is_not_reported_as_over_budget():
+    df = _mixed_frame(200)
+    ctx = build_context(df, token_budget=100_000, max_answer_tokens=2048)
+    assert ctx.coverage["over_budget"] is False
+
+
 # ── Sampling: applied above the limit, and always disclosed ───────────────────
 
 def test_plots_downsample_above_the_point_limit():

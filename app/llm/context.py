@@ -31,6 +31,7 @@ import pandas as pd
 from ..analysis.regression import perform_linear_regression
 from ..analysis.statistics import compute_correlations
 from ..data.profile import ColumnKind, ColumnProfile, profile_dataframe
+from .base import ANSWER_SYSTEM_PROMPT
 
 # Bounds — chosen so a wide dataset degrades gracefully rather than truncating
 # mid-fact inside the model's context window.
@@ -67,13 +68,40 @@ MAX_CORRELATION_COLUMNS = 12
 # LIMITS block. A context that admits it is partial is usable; one that was
 # quietly cut is not.
 #
-# Reserve covers the system prompt, the question, and the model's own reply.
-CONTEXT_TOKEN_RESERVE = 1200
-
 # Characters per token. English prose with numbers runs ~4; 3.5 is deliberately
 # pessimistic so the estimate errs toward trimming early rather than
 # overflowing. Avoids a tokenizer dependency for a budget check.
 CHARS_PER_TOKEN = 3.5
+
+# Room left for the question itself, which cannot be measured here: the context
+# is built before the question is read (and cached per data version), so the
+# budget has to assume a generous one rather than look at it.
+QUESTION_TOKEN_MARGIN = 300
+
+# Fallback for callers that don't state how many tokens the model may generate.
+# Matches app.config's LLM_MAX_TOKENS default so the two cannot drift apart
+# silently for the default configuration.
+DEFAULT_MAX_ANSWER_TOKENS = 2048
+
+
+def context_token_reserve(max_answer_tokens: int = DEFAULT_MAX_ANSWER_TOKENS) -> int:
+    """Tokens of the window that are NOT available to the context block.
+
+    This used to be a flat 1200, which was simply wrong: the system prompt
+    alone measures ~585 tokens and the model is configured to generate up to
+    ``LLM_MAX_TOKENS`` (2048 by default). The real reserve for a default setup
+    is ~2900, so a full-sized context plus a long answer could exceed an 8192
+    window by well over a thousand tokens — and the resulting front-truncation
+    is precisely the silent failure this module exists to prevent.
+
+    Measured from the actual system prompt rather than estimated, so editing
+    that prompt can never quietly invalidate the budget again.
+    """
+    return (
+        estimate_tokens(ANSWER_SYSTEM_PROMPT)
+        + QUESTION_TOKEN_MARGIN
+        + max(0, max_answer_tokens)
+    )
 
 # Trimmed in this order. Column descriptions are load-bearing for almost every
 # question and are given up last; correlations are the most specialised and go
@@ -136,6 +164,7 @@ def build_context(
     version: str = "original",
     profiles: dict[str, ColumnProfile] | None = None,
     token_budget: int | None = None,
+    max_answer_tokens: int = DEFAULT_MAX_ANSWER_TOKENS,
 ) -> GroundedContext:
     """Assemble the grounded context for a DataFrame.
 
@@ -204,8 +233,9 @@ def build_context(
 
     # ── Fit to the model's window, dropping the least critical first ──────────
     dropped: list[str] = []
+    allowance: int | None = None
     if token_budget:
-        allowance = max(0, token_budget - CONTEXT_TOKEN_RESERVE)
+        allowance = max(0, token_budget - context_token_reserve(max_answer_tokens))
         for name in _TRIM_ORDER:
             if name not in sections:
                 continue
@@ -257,6 +287,22 @@ def build_context(
             f"about them: {', '.join(readable[d] for d in dropped)}. Say so if a "
             "question needs them."
         )
+    # Only the optional sections can be dropped; the per-column detail is
+    # load-bearing for almost every question and is kept even when that means
+    # exceeding the budget. Saying so is the difference between a context the
+    # model knows is partial and one the runtime quietly cuts from the front.
+    over_budget = False
+    if allowance is not None:
+        projected = estimate_tokens("\n".join(lines))
+        over_budget = projected > allowance
+        if over_budget:
+            limits.append(
+                "This dataset's column list alone exceeds the space available in "
+                "the model's context window. Earlier facts may have been cut off "
+                "before you saw them, so treat any column you cannot actually see "
+                "described above as unknown rather than absent."
+            )
+
     lines += [f"- {limit}" for limit in limits]
 
     text = "\n".join(lines)
@@ -268,6 +314,7 @@ def build_context(
         "version": version,
         "estimated_tokens": estimate_tokens(text),
         "sections_dropped": dropped,
+        "over_budget": over_budget,
     }
 
     return GroundedContext(

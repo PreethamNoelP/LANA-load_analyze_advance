@@ -407,8 +407,11 @@ def _build_query_context(session: Session):
             version=session.active_version,
             profiles=profiles,
             # The configured window, so a wide dataset is trimmed deliberately
-            # here rather than truncated from the front by the runtime.
+            # here rather than truncated from the front by the runtime. The
+            # answer budget travels with it: the space the model is allowed to
+            # fill with its reply is space the context cannot have.
             token_budget=config.llm.num_ctx,
+            max_answer_tokens=config.llm.max_tokens,
         )
     )
 
@@ -635,7 +638,10 @@ def _report_inputs(session: Session) -> dict:
     df = session.active
     profiles = session.profiles()
     return {
-        "context": generate_context(df),
+        # Profile-aware on purpose: without it this block reports a mean for
+        # identifier columns and for LANA's own cleaning annotations, directly
+        # contradicting the profile-filtered summary printed above it.
+        "context": generate_context(df, profiles=profiles),
         "quality": dataset_quality(profiles, len(df)),
         "lineage": session.lineage_narrative(),
         "profiles": profiles,
