@@ -24,6 +24,12 @@ ignore = [
     # "ColumnKind.NUMERIC"). ColumnKind is serialised into API responses, so
     # that is a behaviour change dressed as a style fix, for no benefit.
     "UP042",
+    # isinstance(x, (int, float)) -> isinstance(x, int | float). The tuple is a
+    # constant; the union is rebuilt on every call. Measured here at 1.6x
+    # slower (0.134s vs 0.214s for 2M calls), and the two sites it fires on
+    # (profile._round, main._jsonable) both run per value over a whole frame.
+    # Ruff deprecated this rule for the same reason.
+    "UP038",
 ]
 
 [tool.ruff.lint.flake8-bugbear]
