@@ -14,11 +14,22 @@ Two disjoint buckets, by design:
   explicitly claims to catch, and it's the only bucket the headline
   precision/recall/F1 is computed over.
 * everything else (``attribution`` / ``in_range`` / ``causal``) — failure
-  modes the validator does **not** claim to catch: a real number attributed
-  to the wrong column, a wrong-but-plausible in-range value, and a
-  non-numeric causal claim. These are included so the boundary is measured
-  and reported, not asserted — expect their catch rate to be low. That's
-  the finding, not a bug in the cases.
+  modes included so the boundary is measured and reported rather than
+  asserted.
+
+  ``attribution`` is no longer in that "expect a low catch rate" group. Both
+  of its cases are caught as of 2026-09-12: the validator now groups facts
+  into families (same statistic, different column or category) and flags a
+  number quoted under a sibling's name. That covers adv-10 (revenue's mean
+  called "marketing spend") and adv-11 (engineering's mean called support's).
+  What it still cannot see is a mislabelling that never names either side
+  literally — the paraphrase case named in KNOWN_BLIND_SPOTS.
+
+  ``in_range`` and ``causal`` remain genuinely out of scope: a wrong-but-
+  plausible value inside a column's range is indistinguishable from a real
+  calculation, and a non-numeric causal claim has nothing to extract. Their
+  catch rate should stay at zero, and ``tests/test_adversarial_suite.py``
+  fails if that silently changes in either direction.
 """
 from __future__ import annotations
 
@@ -80,12 +91,12 @@ def build_cases(retail_df: pd.DataFrame, survey_df: pd.DataFrame) -> list[Advers
             f"Average marketing spend is about ${r_marketing_mean:,.2f}.",
             "Matches the true computed mean."),
 
-        # ── Out of scope: right number, wrong attribution ──
+        # ── Attribution: right number, wrong label (in scope since 2026-09-12) ──
         AdversarialCase("adv-10", "retail", "attribution", True,
             f"The average marketing spend per order is ${r_mean:,.2f}.",
             "The dollar figure is real, but it's revenue's true mean, not marketing "
-            "spend's — validate_answer only checks whether a VALUE matches ANY fact, "
-            "not whether the claimed label matches the fact it actually came from."),
+            "spend's. Caught since column statistics gained a fact family: the "
+            "sibling check sees 'marketing spend' named next to revenue's number."),
         AdversarialCase("adv-11", "survey", "attribution", True,
             f"The support department's average salary is ${s_eng_mean:,.0f}.",
             f"That figure (${s_eng_mean:,.0f}) is engineering's true mean "
