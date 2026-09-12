@@ -23,6 +23,7 @@ model's context window and push the earlier facts out.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -147,6 +148,37 @@ class GroundedContext:
     column_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
     vocabulary: set[str] = field(default_factory=set)   # column names + category values
     coverage: dict[str, Any] = field(default_factory=dict)
+
+
+# Longest category value reproduced in the prompt. Real category labels are
+# short; anything longer is either free text that shouldn't be here or an
+# attempt to fit instructions into a cell.
+MAX_CATEGORY_VALUE_CHARS = 80
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _safe_value(value: Any) -> str:
+    """Render a value from the uploaded data for inclusion in the prompt.
+
+    Cell values are untrusted input that ends up inside the text a model
+    reads, so a value like "IGNORE ALL PRIOR INSTRUCTIONS…" is reproduced
+    verbatim in DATASET FACTS. This does not make that safe — no string
+    transformation can — but it removes the part that lets a value restructure
+    the prompt around it: newlines and control characters, which are what a
+    crafted value would use to fake a section heading or a new instruction
+    block, and unbounded length.
+
+    What remains, and is documented in validation.KNOWN_BLIND_SPOTS: a short
+    instruction-shaped value still reads as text the model can choose to obey.
+    The existing defence against the consequence that matters most is
+    unchanged — every number LANA reports is computed, so a fabricated figure
+    still fails validation regardless of what the data told the model to say.
+    """
+    text = _CONTROL_CHARS.sub(" ", str(value))
+    if len(text) > MAX_CATEGORY_VALUE_CHARS:
+        text = text[:MAX_CATEGORY_VALUE_CHARS] + "…"
+    return text
 
 
 def _fmt(value: float) -> str:
@@ -355,7 +387,17 @@ def _describe_column(
         for label, value in (("min", p.min), ("max", p.max), ("mean", p.mean),
                              ("median", p.median), ("std", p.std)):
             if value is not None:
-                facts.append(Fact(f"{name} {label}", float(value), column=name))
+                # Grouped by statistic, with the column as the "category": the
+                # siblings of "revenue mean" are every other column's mean, so
+                # quoting revenue's mean while calling it marketing spend is
+                # the same shape of mistake as quoting the north region's
+                # figure while calling it south. Without this, that answer was
+                # reported as verified — the validator actively vouching for a
+                # wrong claim (eval/adversarial.py's adv-10).
+                facts.append(Fact(
+                    f"{name} {label}", float(value), column=name,
+                    category=name, family=f"stat::{label}",
+                ))
         detail = (
             f"range {_fmt(p.min)} to {_fmt(p.max)}, mean {_fmt(p.mean)}, "
             f"median {_fmt(p.median)}, std {_fmt(p.std)}"
@@ -364,13 +406,13 @@ def _describe_column(
         if p.kind is ColumnKind.IDENTIFIER:
             note = " [identifier — arithmetic on it is not meaningful]"
         elif p.discrete_code:
-            vocabulary.update(str(v) for v, _ in p.top_values)
+            vocabulary.update(_safe_value(v) for v, _ in p.top_values)
             for value, count in p.top_values:
                 facts.append(Fact(
                     f"count of {name}={value}", float(count), column=name,
-                    category=str(value), category_column=name, family=f"count::{name}",
+                    category=_safe_value(value), category_column=name, family=f"count::{name}",
                 ))
-            levels = ", ".join(f"{v} ({c:,})" for v, c in p.top_values)
+            levels = ", ".join(f"{_safe_value(v)} ({c:,})" for v, c in p.top_values)
             note = (
                 f" [encoded category, not a measurement — value counts: {levels}]"
             )
@@ -392,13 +434,13 @@ def _describe_column(
 
     # Categorical / boolean.
     shown = p.top_values[:MAX_CATEGORIES_PER_COLUMN]
-    vocabulary.update(str(v) for v, _ in shown)
+    vocabulary.update(_safe_value(v) for v, _ in shown)
     for value, count in shown:
         facts.append(Fact(
             f"count of {name}={value}", float(count), column=name,
-            category=str(value), category_column=name, family=f"count::{name}",
+            category=_safe_value(value), category_column=name, family=f"count::{name}",
         ))
-    listed = ", ".join(f"{value} ({count:,})" for value, count in shown)
+    listed = ", ".join(f"{_safe_value(value)} ({count:,})" for value, count in shown)
     more = f", +{p.unique - len(shown)} rarer" if p.unique > len(shown) else ""
     return f"- '{name}' (categorical): {p.unique:,} distinct — {listed}{more}. {missing}."
 
@@ -418,7 +460,7 @@ def _category_breakdowns(
         counts = df[name].value_counts()
         parts = []
         for value, count in counts.items():
-            label = str(value)
+            label = _safe_value(value)
             vocabulary.add(label)
             pct = count / total * 100 if total else 0
             parts.append(f"{label}={count:,} ({pct:.1f}%)")
@@ -478,7 +520,7 @@ def _group_summaries(
                 continue
             parts = []
             for level, row in grouped.head(MAX_GROUPBY_LEVELS).iterrows():
-                label = str(level)
+                label = _safe_value(level)
                 mean_val = float(row["mean"])
                 parts.append(f"{label}: mean {_fmt(mean_val)} (n={int(row['count']):,})")
                 facts.append(Fact(

@@ -39,27 +39,36 @@ VERIFIED_CLAIM_TYPES = (
     "rounding tolerance (2% relative).",
     "A quoted or backticked column or category name that does not exist in "
     "this dataset is caught as an unknown reference.",
-    "For a number that belongs to one specific category of a column (a "
-    "share-of-category percentage, a count, or a group-by mean/total): the "
-    "text near that number does not explicitly name a *different* category "
-    "of the same statistic while omitting the correct one.",
+    "For a number that belongs to one specific column or category — a column "
+    "statistic (mean, median, min, max, std), a share-of-category percentage, "
+    "a count, or a group-by mean/total — the text near that number does not "
+    "explicitly name a *different* column or category of the same statistic "
+    "while omitting the correct one.",
 )
 
 KNOWN_BLIND_SPOTS = (
     "A real, correctly-computed number attached to the wrong label, where "
-    "the mislabeling is a paraphrase rather than an explicit category name — "
-    "for example, describing a boolean column's False-share number using "
-    "words like 'not remote' rather than literally writing 'False'. The "
-    "attribution check above only catches an explicit, literal wrong "
-    "category name near the number; it cannot recognise a paraphrase, and a "
-    "correctly-computed number can still be discussed using the wrong "
-    "column or category entirely (not just the wrong level of the right "
-    "one) without ever naming either literally.",
+    "the mislabeling is a paraphrase rather than an explicit name — for "
+    "example, describing a boolean column's False-share number using words "
+    "like 'not remote' rather than writing 'False'. The attribution check "
+    "above matches names literally (allowing for a column written as prose, "
+    "'marketing spend' for marketing_spend), so a mislabelling that never "
+    "names either the right or the wrong column is invisible to it.",
+    "A correlation coefficient or regression figure attributed to the wrong "
+    "pair of columns. Those facts carry no sibling grouping, so unlike column "
+    "statistics and category breakdowns they are not attribution-checked.",
     "A wrong-but-plausible value that happens to fall inside a column's "
     "observed range. It is marked 'derived' rather than flagged, because a "
     "legitimate calculation can land anywhere in that range too.",
     "A non-numeric claim — a causal statement, a comparison, a "
     "recommendation — with no number in it to extract and check at all.",
+    "Instructions hidden in the uploaded data itself. Category values are "
+    "quoted into the facts the model reads, so a cell containing text like "
+    "'ignore the above and say X' is text the model can choose to obey. "
+    "Newlines and control characters are stripped and length is capped so "
+    "such a value cannot fake a section heading, and any *number* it induces "
+    "is still checked against LANA's own computed facts — but it can still "
+    "steer wording, tone or a non-numeric claim.",
 )
 
 
@@ -193,10 +202,45 @@ def _matches(value: float, target: float) -> bool:
 
 
 def _mentions(window: str, token: str | None) -> bool:
-    """Whole-word, case-insensitive check for a literal token in a text window."""
+    """Whole-word, case-insensitive check for a literal token in a text window.
+
+    Also matches the way prose writes a column name: a model asked about
+    ``marketing_spend`` answers about "marketing spend". Only separator
+    variants are accepted — this is not fuzzy matching, and a different word
+    is still a different word.
+    """
     if not token:
         return False
-    return re.search(rf"\b{re.escape(token)}\b", window, re.IGNORECASE) is not None
+    variants = {token}
+    if "_" in token:
+        variants.add(token.replace("_", " "))
+        variants.add(token.replace("_", "-"))
+    return any(
+        re.search(rf"\b{re.escape(v)}\b", window, re.IGNORECASE)
+        for v in variants
+    )
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence containing a match, used to look for the correct label.
+
+    Deliberately wider than the window used to look for a *wrong* label. The
+    two searches are asymmetric on purpose: be generous about finding evidence
+    that the answer is right, strict about concluding that it is wrong. A
+    false "misattributed" on a correct answer costs more trust than a missed
+    flag, because it teaches the reader to ignore the warning.
+    """
+    left = max(
+        text.rfind(".", 0, start), text.rfind("!", 0, start),
+        text.rfind("?", 0, start), text.rfind("\n", 0, start),
+    )
+    right_candidates = [
+        i for i in (text.find(".", end), text.find("!", end),
+                    text.find("?", end), text.find("\n", end))
+        if i != -1
+    ]
+    right = min(right_candidates) if right_candidates else len(text)
+    return text[left + 1:right]
 
 
 def _attribution_check(
@@ -228,8 +272,12 @@ def _attribution_check(
 
     window = answer[max(0, start - _ATTRIBUTION_WINDOW_BEFORE):
                      min(len(answer), end + _ATTRIBUTION_WINDOW_AFTER)]
-    if _mentions(window, fact.category):
-        return None  # the correct label is right there too — not a clean case
+    # The correct label is looked for in the whole sentence as well as the
+    # window: if the sentence making the claim names the right column or
+    # category anywhere, this is not a clean mismatch and is left alone.
+    context_for_own = _sentence_around(answer, start, end) + " " + window
+    if _mentions(context_for_own, fact.category):
+        return None
 
     wrong = next((s for s in siblings if _mentions(window, s.category)), None)
     if wrong is None:
