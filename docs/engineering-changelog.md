@@ -491,3 +491,81 @@ alongside correctness fixes), no Docker. The model-driven half of `eval/` was
 not re-run: it needs a live Ollama and 40 completions, and none of these
 changes alter what the model is asked — only what it is told and what happens
 to its answer afterwards.
+
+---
+
+## 2026-09-12 — Closing the last attribution gap, and two things that were
+## quietly corrupting the validator
+
+**The gap that was left.** The previous round gave column statistics and
+category breakdowns a fact family, so the validator could catch a real number
+quoted under a sibling's name. Correlation and regression figures got nothing,
+and `KNOWN_BLIND_SPOTS` said so plainly. That bullet is now gone.
+
+The reason it took a second pass is that a correlation is not scoped to a
+column, it is scoped to a *pair*, and the existing check compares a single
+category name. Naming one half of a pair is not an attribution: "revenue
+correlates at 0.72" says nothing about what it correlates with. So `Fact`
+gained `category_names` — every name that must appear for the figure to be
+correctly attributed — defaulting to `(category,)` so single-level facts are
+untouched. Correlations form one family; regression coefficient, intercept and
+R² are three, because an R² is not an alternative reading of a slope.
+
+Naming half a pair is treated as too vague to be a mislabelling rather than as
+an error, which keeps the asymmetry the rest of this check runs on: generous
+about evidence the answer is right, strict about concluding it is wrong.
+
+**A false positive this would have shipped.** Writing the tests surfaced
+something the design had missed. Correlation coefficients cluster in a narrow
+band, and the validator's 2% *relative* tolerance is tiny in absolute terms
+down there — in the eval retail set, two pairs sit at 0.0674 and 0.0667, which
+are within tolerance of each other. Matching takes the first fact that fits, so
+an answer naming the second pair would have been flagged as misattributed while
+quoting a number that legitimately matches it. A sibling whose own value also
+matches the quoted number is now excluded from consideration. It applies just
+as well to two regions with near-identical means; correlations are only where
+it shows up first.
+
+**The scratchpad problem.** Reasoning models (deepseek-r1, qwen3) emit their
+chain of thought inline in `<think>` tags, and nothing stripped it. The obvious
+cost is that the user reads it. The real cost is that `validate_answer`
+extracts *every* number in the text, and a scratchpad is full of figures the
+model considered and discarded — precisely the numbers that match no fact. A
+test asserts the damage rather than describing it: two discarded figures
+produce two unsupported claims and `trustworthy=False` on an answer that is
+correct. The validator is only worth having if a warning means something.
+
+Stripped in `LLMProvider.answer_question`/`answer_question_stream` so both
+providers get it and a third inherits it. The streaming filter buffers across
+chunk boundaries, because `<think>` genuinely arrives as `<thi` + `nk>` and a
+per-chunk replace would pass the whole scratchpad through. Honest limit: this
+was verified against the tag shape, not against a live reasoning model. There
+is no Ollama running here, and newer Ollama versions may return thinking in a
+separate field instead. Stripping costs nothing either way.
+
+**A comment that was actively misleading.** `LLM_NUM_CTX` was documented as
+"ignored by the openai_compat provider". True of the provider, which never
+sends it; false of LANA, which uses it as the token budget in `build_context`
+for *every* provider. Someone pointing LANA at a hosted model with a 128k
+window and leaving the default at 8192 was having their facts trimmed to 8192
+tokens with nothing saying why.
+
+**Walking back a deadline that was too blunt.** The 20s request timeout added
+last round applied to everything except upload. That suits a metadata read and
+not work that scales with the data: cleaning a large frame, rendering a chart,
+scanning every numeric pair, fitting a regression. Cutting those off turns a
+slow answer into a wrong error message. They now get 120s — still bounded,
+because the deadline exists so that "slow" never becomes "forever".
+
+**And a config entry walked back entirely.** A `UP038` ignore was committed on
+the strength of the local ruff (0.9.10), with a commit message asserting CI's
+lint gate was red. Checking against the pinned version (0.15.1) showed the rule
+had been removed outright and CI had never failed — the ignore bought nothing
+and added a warning to every run. Reverted. The mistake was running a gate
+against a version the repo does not pin, which is the same class of error as
+the stale `.ruff_cache` that started this whole thread.
+
+**Tests.** 168 backend tests, up from 156. `app/llm/reasoning.py` at 100%
+coverage, `validation.py` at 92%, overall 87%. The adversarial suite is 13/16
+with attribution at 4/4 and `numeric_fabrication` still 9/9; the three misses
+remain the `in_range` and `causal` buckets named as out of scope.
