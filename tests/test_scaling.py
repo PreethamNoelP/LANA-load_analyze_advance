@@ -241,7 +241,8 @@ def test_context_is_cached_and_rebuilt_after_cleaning():
     from app.data.lineage import CleaningLedger
 
     session = Session(session_id="s", filename="f.csv", raw=_mixed_frame(60))
-    build = lambda df, profiles: build_context(df, profiles=profiles)
+    def build(df, profiles):
+        return build_context(df, profiles=profiles)
 
     first = session.context(build)
     assert session.context(build) is first

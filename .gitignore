@@ -57,3 +57,11 @@ Thumbs.db
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# Test/coverage artefacts
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+frontend/coverage/

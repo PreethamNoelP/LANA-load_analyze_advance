@@ -8,18 +8,26 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the documented floor; 3.13 catches deprecations before a
+        # contributor on a newer interpreter hits them.
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Import sanity check
         run: python -c "import backend.main"
+      - name: Lint
+        run: ruff check .
       - name: Run tests
-        run: pytest tests/ -q
+        run: pytest tests/ -q --cov=app --cov=backend --cov-report=term-missing
 
   frontend:
     runs-on: ubuntu-latest
@@ -35,5 +43,36 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
       - name: Build
         run: npm run build
+
+  # Dependency advisories are reported, not enforced: a new CVE in a transitive
+  # dependency should show up on the next run, but it should not turn every
+  # unrelated pull request red until someone can act on it.
+  audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Audit Python dependencies
+        run: pip-audit -r requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Audit shipped frontend dependencies
+        working-directory: frontend
+        # --omit=dev deliberately: the build toolchain is not shipped to users,
+        # and failing on dev-only advisories trains people to ignore this job.
+        run: npm ci && npm audit --omit=dev

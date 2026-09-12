@@ -1,0 +1,47 @@
+[tool.ruff]
+# A .ruff_cache/ has existed in this repo for a while, meaning ruff was run by
+# hand and its findings never enforced anywhere. Config lives here so the
+# editor, the terminal and CI all apply the same rules.
+line-length = 100
+target-version = "py311"
+exclude = [".venv", "venv", "frontend", "chats", "docs"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes: undefined names, unused imports, unused variables
+    "I",    # import sorting
+    "B",    # bugbear: mutable defaults, shadowed loop vars, except-without-raise
+    "UP",   # pyupgrade: syntax that's obsolete on the pinned Python
+    "C4",   # comprehension simplifications
+]
+ignore = [
+    # The codebase deliberately writes long explanatory comments and message
+    # strings; wrapping prose to satisfy a linter makes it harder to read, and
+    # E501 would fire on exactly the parts of this repo worth reading.
+    "E501",
+    # `str, Enum` -> `StrEnum` changes what str() returns ("numeric" instead of
+    # "ColumnKind.NUMERIC"). ColumnKind is serialised into API responses, so
+    # that is a behaviour change dressed as a style fix, for no benefit.
+    "UP042",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency injection *requires* calls like File(...)/Query(...) in
+# parameter defaults; B008 cannot tell that idiom from an accidental mutable
+# default.
+extend-immutable-calls = [
+    "fastapi.File",
+    "fastapi.Query",
+    "fastapi.Depends",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests import fixtures and modules inside functions on purpose, to keep each
+# test's dependencies visible at the point of use.
+"tests/*" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Keep output quiet by default; CI adds coverage flags explicitly.
+addopts = "-q"

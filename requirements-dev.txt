@@ -1,2 +1,5 @@
 # Development / CI extras — runtime deps live in requirements.txt
 pytest==9.1.1
+pytest-cov==7.0.0
+ruff==0.15.1
+pip-audit==2.9.0

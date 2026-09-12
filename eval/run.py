@@ -34,7 +34,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.llm.ollama_provider import OllamaProvider  # noqa: E402
-
 from eval.adversarial import build_cases as build_adversarial_cases  # noqa: E402
 from eval.cases import CASES  # noqa: E402
 from eval.datasets import employee_survey, retail_orders  # noqa: E402

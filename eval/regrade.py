@@ -20,7 +20,7 @@ from eval.cases import CASES  # noqa: E402
 from eval.datasets import employee_survey, retail_orders  # noqa: E402
 from eval.ground_truth import resolve as resolve_ground_truth  # noqa: E402
 from eval.harness import grade  # noqa: E402
-from eval.run import summarize, print_summary  # noqa: E402
+from eval.run import summarize  # noqa: E402
 
 
 def main(jsonl_path: str) -> None:

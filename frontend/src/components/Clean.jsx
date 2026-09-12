@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { getCleanPreview, applyClean, switchVersion, getCleanStatus } from '../api.js'
 import ConfirmDialog from './ConfirmDialog.jsx'
+import { GRADE_COLORS } from '../constants.js'
 
 /* ── Small shared primitives ─────────────────────────────────────────────── */
 
@@ -295,11 +296,6 @@ function SchemaSection({ columnTypes, ops, onOpsChange }) {
 
 /* ── Quality Score ───────────────────────────────────────────────────────── */
 
-export const GRADE_COLORS = {
-  excellent: 'var(--green)', good: 'var(--green)',
-  fair: 'var(--amber)', poor: 'var(--red)',
-}
-
 function QualityBanner({ quality }) {
   const color = GRADE_COLORS[quality.grade] || 'var(--muted)'
   return (
@@ -458,10 +454,13 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
   const [restoredLineage, setRestoredLineage] = useState(null)
 
   useEffect(() => {
-    if (!session || !hasCleanedData) { setRestoredLineage(null); return }
-    getCleanStatus(session.session_id)
-      .then(data => setRestoredLineage(data.lineage || null))
+    const sessionId = session?.session_id
+    if (!sessionId || !hasCleanedData) return
+    let cancelled = false
+    getCleanStatus(sessionId)
+      .then(data => { if (!cancelled) setRestoredLineage(data.lineage || null) })
       .catch(() => {})
+    return () => { cancelled = true }
   }, [session?.session_id, hasCleanedData])
 
   // Operation selections
@@ -471,12 +470,10 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
   const [textOps,      setTextOps]      = useState({})
   const [schemaOps,    setSchemaOps]    = useState({})
 
-  useEffect(() => {
-    if (!session) return
-    setResult(null)
-    fetchIssues()
-  }, [session?.session_id])
-
+  // Mounted with key={session.session_id} by the caller, so a dataset switch
+  // remounts this component with empty state instead of needing an effect to
+  // clear a dozen selection fields by hand. This effect only has to kick off
+  // the initial scan.
   async function fetchIssues() {
     setLoading(true)
     setError(null)
@@ -519,6 +516,14 @@ export default function Clean({ session, cleanVersion, hasCleanedData, onCleanAp
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    if (!session?.session_id) return
+    fetchIssues()
+    // fetchIssues is redefined each render; depending on it would re-scan in
+    // a loop. The session id is the only input that should retrigger a scan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.session_id])
 
   function buildOps() {
     const ops = []

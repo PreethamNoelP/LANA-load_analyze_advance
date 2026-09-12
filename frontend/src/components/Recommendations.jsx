@@ -6,15 +6,21 @@ import { getRecommendations } from '../api.js'
 // dataset's columns — a scatter plot only for a pair that really correlates,
 // a time series only when a real datetime column exists) but had no
 // consumer anywhere in the UI.
+// Mounted with key={sessionId} by the caller, so switching datasets remounts
+// this component and its state starts empty — no reset-on-change effect, and
+// no window where the previous dataset's suggestions are shown against the
+// new one. `cancelled` still guards the in-flight response, since a fast
+// dataset switch can resolve an old request after the new mount.
 export default function Recommendations({ sessionId, onGoTo }) {
   const [recs, setRecs] = useState(null)
 
   useEffect(() => {
     if (!sessionId) return
-    setRecs(null)
+    let cancelled = false
     getRecommendations(sessionId)
-      .then(d => setRecs(d.recommendations))
-      .catch(() => setRecs(null))
+      .then(d => { if (!cancelled) setRecs(d.recommendations) })
+      .catch(() => { if (!cancelled) setRecs(null) })
+    return () => { cancelled = true }
   }, [sessionId])
 
   if (!recs || (!recs.viz?.length && !recs.analysis?.length)) return null

@@ -18,6 +18,7 @@ from app.data.profile import ColumnKind, profile_column, profile_dataframe, sugg
 from app.llm.context import build_context
 from app.llm.validation import capability_summary, validate_answer
 
+
 def rng(seed: int = 20260809) -> np.random.Generator:
     """A fresh seeded generator per call.
 
@@ -291,7 +292,7 @@ def test_tiny_sample_admits_it_cannot_quantify_uncertainty():
 def test_bh_qvalues_are_monotone_and_never_below_p():
     p = [0.001, 0.01, 0.03, 0.2, 0.7]
     q = _bh_qvalues(p)
-    assert all(qi >= pi - 1e-12 for qi, pi in zip(q, p))
+    assert all(qi >= pi - 1e-12 for qi, pi in zip(q, p, strict=True))
     assert q == sorted(q)
     assert all(0.0 <= qi <= 1.0 for qi in q)
 

@@ -27,7 +27,8 @@ from app.llm.validation import validate_answer
 
 from . import grading
 from .adversarial import AdversarialCase
-from .ground_truth import GroundTruth, resolve as resolve_ground_truth
+from .ground_truth import GroundTruth
+from .ground_truth import resolve as resolve_ground_truth
 
 NAIVE_SYSTEM_PROMPT = (
     "You are a helpful data analyst assistant. Answer the user's question "

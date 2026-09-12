@@ -196,7 +196,7 @@ def test_session_store_evicts_least_recently_used(client, monkeypatch):
 
 def test_exports_handle_non_latin1_data(client):
     # Regression: fpdf 1.x crashed with UnicodeEncodeError on such datasets.
-    csv = "población,θ_angle,city\n1,0.1,München\n2,0.2,東京\n".encode("utf-8")
+    csv = "población,θ_angle,city\n1,0.1,München\n2,0.2,東京\n".encode()
     sid = upload(client, csv, "unicode.csv")["session_id"]
 
     pdf = client.get(f"/export/pdf/{sid}")

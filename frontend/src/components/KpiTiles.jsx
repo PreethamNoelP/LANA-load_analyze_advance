@@ -1,4 +1,4 @@
-import { GRADE_COLORS } from './Clean.jsx'
+import { GRADE_COLORS } from '../constants.js'
 
 export default function KpiTiles({ session }) {
   if (!session) return null

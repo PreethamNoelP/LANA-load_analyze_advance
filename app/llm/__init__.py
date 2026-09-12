@@ -1,9 +1,9 @@
 import threading
 
+from ..config import config
 from .base import LLMProvider
 from .ollama_provider import OllamaProvider
 from .openai_compat import OpenAICompatProvider
-from ..config import config
 
 # Providers are stateless apart from their HTTP client, and rebuilding that
 # client per request throws away connection reuse — noticeable when a local

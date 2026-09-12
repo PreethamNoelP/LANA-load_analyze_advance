@@ -1,37 +1,38 @@
-import sys
 import json
 import logging
-import re
-import uuid
 import math
+import re
+import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Literal
+
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.config import config
-from app.resources import HOST, UPLOAD_PEAK_MULTIPLIER, can_admit
-from app.llm import get_provider
-from app.llm.context import build_context
-from app.llm.validation import capability_summary, validate_answer
+from app.analysis.regression import perform_linear_regression
 from app.analysis.statistics import (
     analyze_correlations,
     compute_statistics,
     generate_context,
     generate_recommendations,
 )
-from app.analysis.regression import perform_linear_regression
+from app.config import config
 from app.data import ingest
 from app.data.cleaner import apply_cleaning, detect_issues
 from app.data.profile import dataset_quality
+from app.llm import get_provider
+from app.llm.context import build_context
+from app.llm.validation import capability_summary, validate_answer
+from app.resources import HOST, UPLOAD_PEAK_MULTIPLIER, can_admit
 from app.visualization.charts import CHART_TYPES, create_chart
 from backend.session_store import CLEANED, ORIGINAL, Session, SessionStore
 
@@ -224,7 +225,7 @@ async def upload(file: UploadFile = File(...)):
             file.read, limit_bytes, f"{MAX_UPLOAD_MB} MB"
         )
     except ingest.UploadTooLarge as e:
-        raise HTTPException(413, f"{e} Set LANA_MAX_UPLOAD_MB to override.")
+        raise HTTPException(413, f"{e} Set LANA_MAX_UPLOAD_MB to override.") from e
 
     try:
         # Admission is decided before the parse, not after it. Projecting the
@@ -270,7 +271,7 @@ async def upload(file: UploadFile = File(...)):
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(400, f"Could not parse file: {e}")
+            raise HTTPException(400, f"Could not parse file: {e}") from e
     finally:
         # Releases the spool's memory, and deletes its backing file if it
         # spilled. Nothing is left on disk after the request.
@@ -426,7 +427,7 @@ def query(req: QueryReq):
         provider = get_provider()
         answer = provider.answer_question(req.question, context.text)
     except Exception as e:
-        raise HTTPException(*_llm_error(e))
+        raise HTTPException(*_llm_error(e)) from e
     finally:
         _llm_semaphore.release()
 
@@ -525,7 +526,7 @@ def regression(req: RegressionReq):
     try:
         result = perform_linear_regression(df, req.x_col, req.y_col)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     return _jsonable(result.as_dict())
 
 
@@ -551,7 +552,7 @@ def chart(req: ChartReq):
             secondary_column=req.x_col, profiles=session.profiles(),
         )
     except Exception as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     return Response(content=png, media_type="image/png")
 
 
@@ -661,7 +662,7 @@ def export_pdf(session_id: str):
             profiles=inputs["profiles"],
         )
     except Exception as e:
-        raise HTTPException(500, f"PDF generation failed: {e}")
+        raise HTTPException(500, f"PDF generation failed: {e}") from e
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": 'attachment; filename="lana_report.pdf"'})
 
@@ -679,7 +680,7 @@ def export_docx(session_id: str):
             profiles=inputs["profiles"],
         )
     except Exception as e:
-        raise HTTPException(500, f"Word report generation failed: {e}")
+        raise HTTPException(500, f"Word report generation failed: {e}") from e
     return Response(
         content=docx,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -740,8 +741,8 @@ def set_version(session_id: str, req: VersionReq):
         raise HTTPException(400, "version must be 'original' or 'cleaned'.")
     try:
         session.set_version(req.version)
-    except ValueError:
-        raise HTTPException(400, "No cleaned version available. Apply cleaning first.")
+    except ValueError as e:
+        raise HTTPException(400, "No cleaned version available. Apply cleaning first.") from e
     return {"version": req.version}
 
 

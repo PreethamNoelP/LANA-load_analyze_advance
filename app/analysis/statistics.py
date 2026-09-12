@@ -15,7 +15,6 @@ Two principles distinguish this from calling ``df.describe()``:
 
 from __future__ import annotations
 
-import warnings
 from itertools import combinations
 from typing import Any, Literal
 
@@ -306,7 +305,7 @@ def _correlate(
     q_values = _bh_qvalues([r["p_value"] for r in raw])
     tests = len(raw)
 
-    for entry, q in zip(raw, q_values):
+    for entry, q in zip(raw, q_values, strict=True):
         r = entry["correlation"]
         entry["q_value"] = round(float(q), 6)
         entry["significant"] = bool(q < alpha)

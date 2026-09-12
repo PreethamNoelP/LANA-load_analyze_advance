@@ -11,7 +11,7 @@ a model failure when it was actually a grading-harness bug.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
