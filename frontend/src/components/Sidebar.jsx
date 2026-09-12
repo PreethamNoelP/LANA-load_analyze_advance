@@ -19,7 +19,12 @@ function StatusPill({ llmStatus }) {
 
   return (
     <div
-      title={up ? undefined : 'Check that Ollama is running and the configured model has been pulled.'}
+      // The label text is hidden on a narrow viewport, where the pill collapses
+      // to a bare coloured dot — so the status has to survive as an accessible
+      // name, or it is conveyed by colour alone.
+      role="status"
+      aria-label={label}
+      title={up ? label : 'Check that Ollama is running and the configured model has been pulled.'}
       style={{
         padding: '10px 12px', background: bg, border: `1px solid ${border}`,
         borderRadius: 8, fontSize: 12, color, display: 'flex', alignItems: 'center', gap: 8,
@@ -92,6 +97,9 @@ export default function Sidebar({ session, llmStatus, onUploadNew }) {
         <button
           onClick={() => session ? setConfirmOpen(true) : onUploadNew()}
           title="New dataset"
+          // Visible text collapses to "+" on a narrow viewport; the accessible
+          // name must not collapse with it.
+          aria-label="Start a new dataset"
           style={{
             display: 'block',
             width: '100%',

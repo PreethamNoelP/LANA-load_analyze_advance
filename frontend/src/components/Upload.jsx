@@ -96,7 +96,19 @@ export default function Upload({ onUpload }) {
           background: dragging ? 'rgba(91,108,255,0.06)' : 'var(--surface)',
           cursor: 'pointer',
         }}
+        // The primary way into the whole app, so it cannot be mouse-only:
+        // a div with onClick is invisible to keyboard navigation until it is
+        // given a role, a tab stop, and key handling.
+        role="button"
+        tabIndex={0}
+        aria-label="Upload a dataset: drop a file here, or activate to browse"
         onClick={() => inputRef.current?.click()}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            inputRef.current?.click()
+          }
+        }}
         onDragOver={e => { e.preventDefault(); setDragging(true) }}
         onDragLeave={() => setDragging(false)}
         onDrop={e => {
