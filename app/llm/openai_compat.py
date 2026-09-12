@@ -43,8 +43,8 @@ class OpenAICompatProvider(LLMProvider):
                     api_key=self._api_key or "not-needed",
                     timeout=self.timeout,
                 )
-            except ImportError:
-                raise ImportError("Install the openai package: pip install openai")
+            except ImportError as e:
+                raise ImportError("Install the openai package: pip install openai") from e
         return self._client
 
     def generate(self, prompt: str, system_prompt: str | None = None) -> str:
@@ -58,7 +58,18 @@ class OpenAICompatProvider(LLMProvider):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
-        return response.choices[0].message.content
+        # Same guard the streaming path has had all along: `choices` comes back
+        # empty when a provider filters the response, and indexing it blindly
+        # turns that into "list index out of range" — an error that tells the
+        # user nothing about what actually happened.
+        if not response.choices:
+            raise RuntimeError(
+                "The model returned no choices. The provider may have filtered "
+                "the response, or the model name may be wrong."
+            )
+        # The API types content as optional, and a filtered or empty completion
+        # really can return None. The ABC promises a str.
+        return response.choices[0].message.content or ""
 
     def generate_stream(self, prompt: str, system_prompt: str | None = None) -> Iterator[str]:
         messages = []

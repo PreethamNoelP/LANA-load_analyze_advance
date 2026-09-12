@@ -32,8 +32,8 @@ class OllamaProvider(LLMProvider):
             try:
                 import ollama
                 self._client = ollama.Client(host=self.host, timeout=self.timeout)
-            except ImportError:
-                raise ImportError("Install the ollama package: pip install ollama")
+            except ImportError as e:
+                raise ImportError("Install the ollama package: pip install ollama") from e
         return self._client
 
     def generate(self, prompt: str, system_prompt: str | None = None) -> str:
@@ -46,7 +46,11 @@ class OllamaProvider(LLMProvider):
             messages=messages,
             options={"temperature": self.temperature, "num_predict": self.max_tokens, "num_ctx": self.num_ctx},
         )
-        return response.message.content
+        # The ollama client types Message.content as Optional[str]; an empty or
+        # filtered completion really does come back as None. The ABC promises a
+        # str, and returning None instead means the caller renders a blank
+        # answer bubble with no indication that anything went wrong.
+        return response.message.content or ""
 
     def generate_stream(self, prompt: str, system_prompt: str | None = None) -> Iterator[str]:
         messages = []
