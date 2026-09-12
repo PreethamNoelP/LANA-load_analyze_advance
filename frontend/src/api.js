@@ -3,7 +3,15 @@ const BASE = '/api'
 // Nothing here may hang forever. Without a deadline a stalled connection
 // leaves a caller's loading state on permanently — during session restore
 // that meant a blank screen with no spinner and no way out.
+// 20s suits a metadata read: anything that is just looking something up has
+// either answered or failed well inside it.
 const DEFAULT_TIMEOUT_MS = 20_000
+// Work that scales with the size of the dataset does not. Cleaning a large
+// frame, rendering a chart server-side, scanning every numeric pair for
+// correlation or fitting a regression can all legitimately run past 20s on a
+// big upload, and killing them would turn a slow answer into a wrong error
+// message. Still bounded, because "slow" must not mean "forever".
+const ANALYSIS_TIMEOUT_MS = 120_000
 // Parsing and profiling a large upload legitimately takes much longer than a
 // metadata read, so that one call gets its own, far more generous deadline.
 const UPLOAD_TIMEOUT_MS = 300_000
@@ -120,7 +128,8 @@ export async function getStats(sessionId, column) {
 
 export async function getCorrelations(sessionId, method = 'pearson') {
   return ok(await request(
-    `/correlation/${encodeURIComponent(sessionId)}?method=${encodeURIComponent(method)}`))
+    `/correlation/${encodeURIComponent(sessionId)}?method=${encodeURIComponent(method)}`,
+    { timeoutMs: ANALYSIS_TIMEOUT_MS }))
 }
 
 export async function runRegression(sessionId, xCol, yCol) {
@@ -128,6 +137,7 @@ export async function runRegression(sessionId, xCol, yCol) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: sessionId, x_col: xCol, y_col: yCol }),
+    timeoutMs: ANALYSIS_TIMEOUT_MS,
   }))
 }
 
@@ -136,6 +146,7 @@ export async function getChartBlob(sessionId, column, chartType, xCol) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: sessionId, column, chart_type: chartType, x_col: xCol }),
+    timeoutMs: ANALYSIS_TIMEOUT_MS,
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -156,7 +167,8 @@ export async function getHealth() {
 }
 
 export async function getRecommendations(sessionId) {
-  return ok(await request(`/recommendations/${encodeURIComponent(sessionId)}`))
+  return ok(await request(`/recommendations/${encodeURIComponent(sessionId)}`,
+    { timeoutMs: ANALYSIS_TIMEOUT_MS }))
 }
 
 export async function getValidatorCapabilities() {
@@ -168,7 +180,8 @@ export function exportPdfUrl(sessionId)  { return `${BASE}/export/pdf/${sessionI
 export function exportDocxUrl(sessionId) { return `${BASE}/export/docx/${sessionId}` }
 
 export async function getCleanPreview(sessionId) {
-  return ok(await request(`/clean/preview/${encodeURIComponent(sessionId)}`))
+  return ok(await request(`/clean/preview/${encodeURIComponent(sessionId)}`,
+    { timeoutMs: ANALYSIS_TIMEOUT_MS }))
 }
 
 export async function applyClean(sessionId, operations) {
@@ -176,6 +189,7 @@ export async function applyClean(sessionId, operations) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ operations }),
+    timeoutMs: ANALYSIS_TIMEOUT_MS,
   }))
 }
 
@@ -184,6 +198,7 @@ export async function switchVersion(sessionId, version) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ version }),
+    timeoutMs: ANALYSIS_TIMEOUT_MS,
   }))
 }
 
