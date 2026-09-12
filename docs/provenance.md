@@ -40,8 +40,11 @@ and function names below are exact.
      of the one this fact actually belongs to (e.g. quoting the
      `region=north` figure while the sentence says `south`, or quoting
      revenue's mean while the sentence says "marketing spend"). Added
-     2026-09-05 for categories, extended to column statistics 2026-09-12;
-     see the example below for exactly what it does and doesn't catch.
+     2026-09-05 for categories, extended to column statistics 2026-09-12,
+     and to correlation and regression figures the same day. A figure that
+     belongs to a *pair* of columns is attributable only by naming both of
+     them, so naming one half is treated as vague rather than wrong; see
+     the example below for exactly what it does and doesn't catch.
    - **derived** — inside the observed range of a column mentioned nearby,
      so it's plausibly a real calculation, just not an exact fact match.
    - **unsupported** — matches nothing, and falls outside every column's
@@ -105,6 +108,12 @@ drift from what the code does.
   percentage, a count, or a group-by mean/total — the text near that
   number does not explicitly name a *different* column or category of
   the same statistic while omitting the correct one.
+- For a figure that belongs to a *pair* of columns — a correlation
+  coefficient, or a regression coefficient, intercept or R^2 — the text
+  near it does not name a different pair LANA also computed while
+  leaving out one of the two columns the figure actually came from.
+  Naming half a pair is treated as too vague to be a mislabelling, not
+  as an error.
 
 **Does not verify:**
 - A real, correctly-computed number attached to the wrong label, where
@@ -114,10 +123,16 @@ drift from what the code does.
   above matches names literally (allowing for a column written as prose,
   'marketing spend' for marketing_spend), so a mislabelling that never
   names either the right or the wrong column is invisible to it.
-- A correlation coefficient or regression figure attributed to the wrong
-  pair of columns. Those facts carry no sibling grouping, so unlike
-  column statistics and category breakdowns they are not attribution-
-  checked.
+- A correlation or regression figure pinned to a pair of columns LANA
+  never actually scanned. The attribution check compares a figure
+  against the other pairs in the same context, so a pairing that was
+  never computed has no sibling to contradict it — and if both column
+  names are real, the unknown-reference check has nothing to say either.
+- Which of two near-identical figures an answer meant. Where a sibling's
+  own value also falls within the 2% tolerance of the quoted number —
+  common for correlation coefficients, which cluster — naming that
+  sibling is accepted rather than flagged, because it is a defensible
+  reading of the same number.
 - A wrong-but-plausible value that happens to fall inside a column's
   observed range. It is marked 'derived' rather than flagged, because a
   legitimate calculation can land anywhere in that range too.
