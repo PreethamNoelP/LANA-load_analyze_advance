@@ -33,13 +33,15 @@ and function names below are exact.
    the `Fact` list from step 2, within a 2% tolerance. Each number lands in
    exactly one of four states:
    - **verified** — matches a fact within tolerance, and (for a fact scoped
-     to one category of a column) the text doesn't explicitly name a
-     *different* category of that same statistic near the number.
+     to one column or category) the text doesn't explicitly name a
+     *different* column or category of that same statistic near the number.
    - **misattributed** — matches a fact within tolerance, but the text
-     nearby explicitly names a different, sibling category instead of the
-     one this fact actually belongs to (e.g. quoting the `region=north`
-     figure while the sentence says `south`). Added 2026-09-05; see the
-     example below for exactly what it does and doesn't catch.
+     nearby explicitly names a different, sibling column or category instead
+     of the one this fact actually belongs to (e.g. quoting the
+     `region=north` figure while the sentence says `south`, or quoting
+     revenue's mean while the sentence says "marketing spend"). Added
+     2026-09-05 for categories, extended to column statistics 2026-09-12;
+     see the example below for exactly what it does and doesn't catch.
    - **derived** — inside the observed range of a column mentioned nearby,
      so it's plausibly a real calculation, just not an exact fact match.
    - **unsupported** — matches nothing, and falls outside every column's
@@ -98,26 +100,36 @@ drift from what the code does.
   rounding tolerance (2% relative).
 - A quoted or backticked column or category name that does not exist in
   this dataset is caught as an unknown reference.
-- For a number scoped to one category of a column (a share-of-category
-  percentage, a count, or a group-by mean/total): the text near that
-  number does not explicitly name a *different* category of the same
-  statistic while omitting the correct one.
+- For a number that belongs to one specific column or category — a
+  column statistic (mean, median, min, max, std), a share-of-category
+  percentage, a count, or a group-by mean/total — the text near that
+  number does not explicitly name a *different* column or category of
+  the same statistic while omitting the correct one.
 
 **Does not verify:**
-- A real, correctly-computed number attached to the wrong label, where the
-  mislabeling is a paraphrase rather than an explicit category name — for
+- A real, correctly-computed number attached to the wrong label, where
+  the mislabeling is a paraphrase rather than an explicit name — for
   example, describing a boolean column's False-share number using words
-  like "not remote" rather than literally writing "False". The check
-  above only catches an explicit, literal wrong category name near the
-  number; it cannot recognise a paraphrase, and a correctly-computed
-  number can still be discussed using the wrong column or category
-  entirely (not just the wrong level of the right one) without ever
-  naming either literally.
+  like 'not remote' rather than writing 'False'. The attribution check
+  above matches names literally (allowing for a column written as prose,
+  'marketing spend' for marketing_spend), so a mislabelling that never
+  names either the right or the wrong column is invisible to it.
+- A correlation coefficient or regression figure attributed to the wrong
+  pair of columns. Those facts carry no sibling grouping, so unlike
+  column statistics and category breakdowns they are not attribution-
+  checked.
 - A wrong-but-plausible value that happens to fall inside a column's
-  observed range (marked "derived", not flagged, because a legitimate
-  calculation can land anywhere in that range too).
+  observed range. It is marked 'derived' rather than flagged, because a
+  legitimate calculation can land anywhere in that range too.
 - A non-numeric claim — a causal statement, a comparison, a
   recommendation — with no number in it to extract and check at all.
+- Instructions hidden in the uploaded data itself. Category values are
+  quoted into the facts the model reads, so a cell containing text like
+  'ignore the above and say X' is text the model can choose to obey.
+  Newlines and control characters are stripped and length is capped so
+  such a value cannot fake a section heading, and any *number* it
+  induces is still checked against LANA's own computed facts — but it
+  can still steer wording, tone or a non-numeric claim.
 
 A validation layer that quietly promises more than this list would be the
 actual risk. This one names its edge on purpose.

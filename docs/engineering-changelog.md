@@ -392,3 +392,102 @@ in isolation, which is the right tier for a change entirely inside
 `python -m eval.run` at some point to see whether real model answers ever
 produce an explicit literal mislabeling in practice, or whether the
 paraphrase case dominates in the wild.
+
+---
+
+## 2026-09-12 — Audit follow-through: a shipping report bug, a budget that was
+## simply wrong, and the first enforced tooling
+
+**Problem.** A full-repo review turned up more than thirty findings. Most were
+noise or nice-to-haves; a handful were real, and two were actively wrong in
+ways no test would have caught.
+
+**The report bug.** The exported PDF/Word "Data Profile" section was built by
+`generate_context()`, which classifies columns by pandas dtype alone. So a
+report printed `mean order_id = 1150` and full statistics for
+`revenue__outlier_score` — LANA's own cleaning annotation — a few lines below
+a "Numeric Column Summary" that correctly excluded both. The report is the one
+artifact that travels to people who never used LANA and cannot spot that. Fixed
+by giving `generate_context()` an optional `profiles` argument and passing it
+from the report path. Deliberately *not* by changing its default behaviour:
+`eval/harness.py` uses the naive, dtype-only mode as the baseline its published
+52.5% figure is measured against, and quietly changing that would make the
+recorded comparison incomparable. A test pins both modes.
+
+**The budget that was wrong.** `CONTEXT_TOKEN_RESERVE` was a flat 1200 tokens,
+commented as covering "the system prompt, the question, and the model's own
+reply". Measured: the system prompt alone is 585 tokens and the model may
+generate `LLM_MAX_TOKENS` (2048). The real reserve is ~2900, so a full context
+plus a long answer overflowed an 8192 window by 1433 tokens — and Ollama
+truncates from the front, discarding the DATASET FACTS while leaving the
+question intact. The module exists to prevent exactly that, and a guessed
+constant had reintroduced it. Now computed from the measured prompt plus the
+configured answer budget, so editing either cannot silently invalidate it.
+
+**Preview and apply disagreeing about outliers.** `detect_outliers` refuses
+below `MIN_POINTS` because quantiles from a handful of points mean nothing, but
+the apply path had no such guard. `/clean/preview` would report "not
+applicable" for a column while `/clean/apply` used those same fences —
+including `remove_outliers`, which deletes rows. A 5-row column lost 20% of the
+dataset to a rule the detector itself called unusable. All three outlier
+operations now refuse through the existing `ledger.skip()` path.
+
+**Attribution, extended.** Column statistics had no fact `family`, so the
+sibling check never ran on them — and `eval/adversarial.py`'s adv-10 (revenue's
+true mean, labelled "marketing spend") was reported as **verified**. Not merely
+missed: the validator was vouching for a wrong answer. Column stats now group
+by statistic with the column as the category. Name matching accepts the prose
+form of a column ("marketing spend" for `marketing_spend`) because that is how
+models write them. The two searches are asymmetric on purpose — the correct
+label is looked for in the whole sentence, a wrong one only in a narrow window
+— because a false "misattributed" on a correct answer costs more than a missed
+flag. Verified against four control phrasings that must not flag.
+
+**A threshold that hid a real signal.** Unknown references only warned above
+*two* of them, so an answer inventing a single plausible segment ("Revenue is
+highest in the 'enterprise' segment") passed silently — adv-04. Lowered to one,
+after checking it caused no false alarms on the suite's correct-answer cases;
+the stoplist gained the statistical vocabulary a model routinely quotes, which
+is what the threshold had been crudely standing in for.
+
+**Uploaded data as an injection surface.** Category values are quoted into the
+text the model reads, and a cell containing newlines could fake a section
+heading. Values are now stripped of control characters and length-capped. This
+is containment, not a fix, and `KNOWN_BLIND_SPOTS` says so: instruction-shaped
+text is still text the model can obey. What holds is that every number LANA
+reports is computed, so a figure the data talked the model into still fails
+validation.
+
+**Tooling, finally enforced.** A `.ruff_cache/` had been in the repo for months
+— ruff run by hand, findings never enforced. The frontend had no linter, no
+formatter and no tests at all. Both are now in CI, along with coverage and a
+Python 3.11/3.13 matrix. Ruff found 28 real issues on first run (13 autofixed;
+the rest mostly exception chaining discarded at ten `raise` sites inside
+`except` blocks). ESLint found three errors including the `GRADE_COLORS`
+cross-import this review had flagged independently. Two React-Compiler rules
+are downgraded to warnings with reasons rather than obeyed: this app fetches in
+effects because it has no data-fetching library and does not need one.
+
+**Tradeoff.** Adding Vitest pulled in dev-only advisories (it depends on the
+same Vite 5 the project already pins). `npm audit --omit=dev` is clean, so
+nothing shipped is affected, and the alternative — no frontend tests at all —
+was the larger risk. It does make the Vite major upgrade worth doing
+deliberately, since it clears that whole cluster at once.
+
+**Tests.** 156 backend tests (was 126) and 6 frontend tests (was 0). The
+deterministic half of `eval/` — the adversarial suite, which makes no model
+calls — now runs in pytest as `tests/test_adversarial_suite.py`, so the
+precision the docs cite is actually gated. It sits at 11/14, up from 10/14,
+with the three remaining misses being the `in_range` and `causal` buckets
+`KNOWN_BLIND_SPOTS` names; the test fails if any of them silently starts
+passing, because that would mean the capability text now understates what LANA
+does.
+
+**Not done, deliberately.** No rate limiting (a dependency, for a documented
+localhost tool where size limits cover the real risk), no mypy (high noise on
+pandas-heavy code without a large typing investment), no APIRouter split of
+`backend/main.py` (a 745-line file worth splitting, but not as a drive-by
+alongside correctness fixes), no Docker. The model-driven half of `eval/` was
+not re-run: it needs a live Ollama and 40 completions, and none of these
+changes alter what the model is asked — only what it is told and what happens
+to its answer afterwards.
