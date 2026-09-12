@@ -88,14 +88,20 @@ class Session:
 
     def set_cleaned(self, df: pd.DataFrame, ledger: CleaningLedger) -> None:
         """Store a derived version. The raw frame is never overwritten."""
-        self.cleaned = df
-        self.ledger = ledger
-        self.active_version = CLEANED
-        self._cleaned_bytes = _frame_bytes(df)
-        # A re-clean replaces the cleaned frame, so anything derived from the
-        # previous one is stale. The original's entries stay valid — that frame
-        # was not touched.
+        # Under the same lock as the cache it invalidates. The fields and the
+        # cached values derived from them are one piece of state: a reader that
+        # saw the new active_version but the previous version's cached profile
+        # would be answering about the wrong frame. Cheap here — this is a
+        # handful of assignments, not the multi-second profiling the cache
+        # deliberately computes outside the lock.
         with self._cache_lock:
+            self.cleaned = df
+            self.ledger = ledger
+            self.active_version = CLEANED
+            self._cleaned_bytes = _frame_bytes(df)
+            # A re-clean replaces the cleaned frame, so anything derived from
+            # the previous one is stale. The original's entries stay valid —
+            # that frame was not touched.
             self._profiles.pop(CLEANED, None)
             self._contexts.pop(CLEANED, None)
 
@@ -145,9 +151,13 @@ class Session:
     def set_version(self, version: str) -> None:
         if version not in (ORIGINAL, CLEANED):
             raise ValueError(f"Unknown version '{version}'.")
-        if version == CLEANED and self.cleaned is None:
-            raise ValueError("No cleaned version exists yet.")
-        self.active_version = version
+        # Checked and set under one lock: otherwise a concurrent re-clean can
+        # land between the guard and the assignment, and the check no longer
+        # describes the state being committed.
+        with self._cache_lock:
+            if version == CLEANED and self.cleaned is None:
+                raise ValueError("No cleaned version exists yet.")
+            self.active_version = version
 
     @property
     def nbytes(self) -> int:

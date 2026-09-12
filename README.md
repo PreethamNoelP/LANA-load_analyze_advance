@@ -357,6 +357,18 @@ cd frontend && npm run dev
 
 Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 
+> [!IMPORTANT]
+> **LANA has no authentication, and is built to run on your own machine.**
+> Every endpoint is open to anyone who can reach the port: uploading files,
+> running analysis, generating reports and spending time on your local model.
+> That is the right trade for a single-user local tool, and it is the reason
+> the defaults bind to localhost and the CORS allowlist rejects `*`.
+>
+> Do not run it with `--host 0.0.0.0`, behind a public reverse proxy, or on a
+> shared network without putting authentication in front of it yourself. The
+> upload and request-size limits are there to keep a mistake from taking the
+> machine down — they are not a substitute for access control.
+
 ### User flow
 
 ```

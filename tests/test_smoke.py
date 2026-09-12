@@ -544,6 +544,31 @@ def test_report_summary_derives_profiles_when_the_caller_has_none():
     assert omitted == 0
 
 
+def test_json_endpoints_bound_their_request_bodies(client):
+    # /upload was carefully size-limited while every JSON endpoint accepted an
+    # unbounded body. Inconsistent hardening is worse than none: it invites the
+    # assumption that everything is covered.
+    sid = upload(client)["session_id"]
+
+    huge_question = client.post("/query", json={
+        "session_id": sid, "question": "x" * 10_000,
+    })
+    assert huge_question.status_code == 422
+
+    empty_question = client.post("/query", json={"session_id": sid, "question": ""})
+    assert empty_question.status_code == 422
+
+    too_many_ops = client.post(f"/clean/apply/{sid}", json={
+        "operations": [{"type": "remove_duplicates"}] * 500,
+    })
+    assert too_many_ops.status_code == 422
+
+    # A realistic request is unaffected.
+    assert client.post(f"/clean/apply/{sid}", json={
+        "operations": [{"type": "remove_duplicates"}],
+    }).status_code == 200
+
+
 def test_validator_capabilities_endpoint(client):
     body = client.get("/validator/capabilities").json()
     assert body["verifies"]

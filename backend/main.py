@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -362,9 +362,19 @@ def lineage(session_id: str):
     })
 
 
+# Bounds on request bodies. /upload is carefully size-limited; without these
+# the JSON endpoints were not, which is the kind of inconsistent hardening that
+# is worse than none — it invites the assumption that everything is covered.
+# The numbers are generous for real use and only exclude payloads that could
+# not be a genuine question or cleaning plan.
+MAX_QUESTION_CHARS = 4_000
+MAX_OPERATIONS = 200
+MAX_TEXT_MAPPING_ENTRIES = 1_000
+
+
 class QueryReq(BaseModel):
-    session_id: str
-    question: str
+    session_id: str = Field(max_length=200)
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
 
 
 class CleanOperation(BaseModel):
@@ -378,14 +388,14 @@ class CleanOperation(BaseModel):
     # 'flag' fills nothing — it records which rows were missing and leaves the
     # nulls in place, which is the non-destructive default for high missingness.
     method: Literal["mean", "median", "zero", "mode", "drop", "flag", "minmax", "zscore"] | None = None
-    mapping: dict | None = None
+    mapping: dict | None = Field(default=None, max_length=MAX_TEXT_MAPPING_ENTRIES)
     dtype: Literal["numeric", "datetime", "category", "text"] | None = None
     outlier_method: Literal["iqr", "modified_zscore"] | None = None
     add_indicator: bool | None = None
 
 
 class CleanReq(BaseModel):
-    operations: list[CleanOperation]
+    operations: list[CleanOperation] = Field(max_length=MAX_OPERATIONS)
 
 
 class VersionReq(BaseModel):
