@@ -707,3 +707,110 @@ def test_detect_issues_reports_quality_profiles_and_reasoning(sales_df):
     assert revenue_outliers["recommended_action"] in ("annotate", "investigate")
     assert revenue_outliers["caveats"]
     assert "rating" not in issues["outliers"]  # codes have no outliers
+
+
+def _pairwise_frame() -> pd.DataFrame:
+    """Three numeric columns with deliberately different pairwise strengths.
+
+    revenue tracks marketing_spend closely; customer_age barely moves with
+    either. That spread matters: the sibling a misattribution check compares
+    against has to be far enough away in value that it is not itself a
+    legitimate match for the quoted number.
+    """
+    r = rng()
+    n = 300
+    marketing_spend = r.uniform(10.0, 200.0, n).round(2)
+    revenue = (40 + 3.0 * marketing_spend + r.normal(0, 25, n)).round(2)
+    customer_age = (34 + r.normal(0, 9, n)).round(1)
+    return pd.DataFrame({
+        "marketing_spend": marketing_spend,
+        "revenue": revenue,
+        "customer_age": customer_age,
+    })
+
+
+def _fact_named(context, *names: str):
+    wanted = set(names)
+    return next(f for f in context.facts if set(f.category_names) == wanted)
+
+
+def test_validation_catches_a_correlation_pinned_to_the_wrong_pair():
+    # The blind spot KNOWN_BLIND_SPOTS named until now: a real coefficient
+    # reported against columns it was not computed from. A correlation is only
+    # attributable by naming *both* of its columns, which is why these facts
+    # carry category_names rather than a single category.
+    context = build_context(_pairwise_frame())
+    strong = _fact_named(context, "revenue", "marketing_spend")
+
+    result = validate_answer(
+        f"Customer age and revenue move together, with r = {strong.value:.2f}.",
+        context,
+    )
+
+    assert result.misattributed_count == 1
+    assert result.verified_count == 0
+    # The pair ordering inside a note comes from the correlation scan, not
+    # from this check, so assert on the names present rather than their order.
+    note = result.claims[0].note
+    assert "customer_age" in note and "marketing_spend" in note
+
+
+def test_correlation_attribution_leaves_correct_and_vague_answers_alone():
+    context = build_context(_pairwise_frame())
+    strong = _fact_named(context, "revenue", "marketing_spend")
+    r_value = f"{strong.value:.2f}"
+
+    # Both columns named: correctly attributed.
+    assert validate_answer(
+        f"Revenue and marketing spend correlate at r = {r_value}.", context
+    ).misattributed_count == 0
+    # Naming one half is too vague to be a mislabelling — there is no wrong
+    # pair being asserted, so flagging it would be a guess.
+    assert validate_answer(
+        f"Revenue shows a correlation of {r_value} with another column.", context
+    ).misattributed_count == 0
+    # A comparison that names the right pair first must survive the presence
+    # of a second pair in the same sentence.
+    assert validate_answer(
+        f"Revenue and marketing spend correlate at {r_value}, far above "
+        "anything involving customer age.",
+        context,
+    ).misattributed_count == 0
+
+
+def test_a_sibling_that_also_matches_the_number_is_not_a_wrong_label():
+    # Correlation coefficients cluster in a narrow band, and the 2% relative
+    # tolerance can cover several of them at once. If the pair the text names
+    # is itself a legitimate match for the quoted value, calling it a
+    # misattribution is a false alarm — the reader wrote a defensible number.
+    from app.llm.context import Fact, GroundedContext
+
+    context = GroundedContext(
+        text="",
+        facts=[
+            Fact("correlation between a and b", 0.0674,
+                 category="a and b", category_names=("a", "b"), family="correlation"),
+            Fact("correlation between c and d", 0.0667,
+                 category="c and d", category_names=("c", "d"), family="correlation"),
+        ],
+    )
+    # 0.067 is within tolerance of both facts; it matches the first, but the
+    # text names the second, which is equally consistent with the number.
+    result = validate_answer("Columns c and d correlate at 0.067.", context)
+
+    assert result.misattributed_count == 0
+
+
+def test_regression_figures_are_attributable_only_by_naming_both_columns():
+    context = build_context(_pairwise_frame())
+    coefficient = next(
+        f for f in context.facts if (f.family or "") == "regression::coefficient"
+    )
+    assert set(coefficient.category_names) == {"revenue", "marketing_spend"}
+    # R^2 and the coefficient are separate families: an R^2 is not an
+    # alternative reading of a slope, so they must never be siblings.
+    families = {
+        f.family for f in context.facts if (f.family or "").startswith("regression::")
+    }
+    assert families == {"regression::coefficient", "regression::intercept",
+                        "regression::r2"}

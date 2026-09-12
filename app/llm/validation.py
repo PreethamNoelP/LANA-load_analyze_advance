@@ -44,6 +44,11 @@ VERIFIED_CLAIM_TYPES = (
     "a count, or a group-by mean/total — the text near that number does not "
     "explicitly name a *different* column or category of the same statistic "
     "while omitting the correct one.",
+    "For a figure that belongs to a *pair* of columns — a correlation "
+    "coefficient, or a regression coefficient, intercept or R^2 — the text "
+    "near it does not name a different pair LANA also computed while leaving "
+    "out one of the two columns the figure actually came from. Naming half a "
+    "pair is treated as too vague to be a mislabelling, not as an error.",
 )
 
 KNOWN_BLIND_SPOTS = (
@@ -54,9 +59,16 @@ KNOWN_BLIND_SPOTS = (
     "above matches names literally (allowing for a column written as prose, "
     "'marketing spend' for marketing_spend), so a mislabelling that never "
     "names either the right or the wrong column is invisible to it.",
-    "A correlation coefficient or regression figure attributed to the wrong "
-    "pair of columns. Those facts carry no sibling grouping, so unlike column "
-    "statistics and category breakdowns they are not attribution-checked.",
+    "A correlation or regression figure pinned to a pair of columns LANA "
+    "never actually scanned. The attribution check compares a figure against "
+    "the other pairs in the same context, so a pairing that was never "
+    "computed has no sibling to contradict it — and if both column names are "
+    "real, the unknown-reference check has nothing to say either.",
+    "Which of two near-identical figures an answer meant. Where a sibling's "
+    "own value also falls within the 2% tolerance of the quoted number — "
+    "common for correlation coefficients, which cluster — naming that sibling "
+    "is accepted rather than flagged, because it is a defensible reading of "
+    "the same number.",
     "A wrong-but-plausible value that happens to fall inside a column's "
     "observed range. It is marked 'derived' rather than flagged, because a "
     "legitimate calculation can land anywhere in that range too.",
@@ -221,6 +233,21 @@ def _mentions(window: str, token: str | None) -> bool:
     )
 
 
+def _attribution_names(fact: Fact) -> tuple[str, ...]:
+    """Every name that must appear for this fact to be correctly attributed.
+
+    One name for a fact scoped to a single category; both column names for a
+    fact that belongs to a pair, such as a correlation or a regression.
+    """
+    if fact.category_names:
+        return fact.category_names
+    return (fact.category,) if fact.category else ()
+
+
+def _mentions_all(window: str, names: tuple[str, ...]) -> bool:
+    return bool(names) and all(_mentions(window, name) for name in names)
+
+
 def _sentence_around(text: str, start: int, end: int) -> str:
     """The sentence containing a match, used to look for the correct label.
 
@@ -249,6 +276,7 @@ def _attribution_check(
     answer: str,
     start: int,
     end: int,
+    value: float,
 ) -> str | None:
     """Look for an explicit, differently-labelled sibling near a matched number.
 
@@ -263,9 +291,19 @@ def _attribution_check(
     """
     if not fact.family:
         return None
+    own_names = _attribution_names(fact)
+    if not own_names:
+        return None
     siblings = [
         f for f in context.facts
-        if f.family == fact.family and f.category != fact.category
+        if f.family == fact.family
+        and _attribution_names(f) != own_names
+        # A sibling whose own value also matches the quoted number is not a
+        # wrong label: naming it is a legitimate reading of that number. This
+        # matters most for correlations, where coefficients cluster in a
+        # narrow band and a 2% relative tolerance covers several of them, but
+        # it applies equally to two regions with near-identical means.
+        and not _matches(value, f.value)
     ]
     if not siblings:
         return None
@@ -276,10 +314,12 @@ def _attribution_check(
     # window: if the sentence making the claim names the right column or
     # category anywhere, this is not a clean mismatch and is left alone.
     context_for_own = _sentence_around(answer, start, end) + " " + window
-    if _mentions(context_for_own, fact.category):
+    if _mentions_all(context_for_own, own_names):
         return None
 
-    wrong = next((s for s in siblings if _mentions(window, s.category)), None)
+    wrong = next(
+        (s for s in siblings if _mentions_all(window, _attribution_names(s))), None
+    )
     if wrong is None:
         return None
     return (
@@ -315,7 +355,9 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
             (fact for fact in context.facts if _matches(value, fact.value)), None
         )
         if matched is not None:
-            note = _attribution_check(matched, context, answer, match.start(), match.end())
+            note = _attribution_check(
+                matched, context, answer, match.start(), match.end(), value
+            )
             status = "misattributed" if note else "verified"
             result.claims.append(
                 NumericClaim(raw, value, status, matched_fact=matched.label, note=note)

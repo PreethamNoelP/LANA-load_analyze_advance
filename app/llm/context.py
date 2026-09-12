@@ -129,6 +129,14 @@ class Fact:
     same statistic, same columns, different category — so the validator can
     tell whether a matched value has siblings a mislabeled answer could have
     confused it with (see validation.py's attribution check).
+
+    ``category_names`` exists because not every fact is attributable by a
+    single name. A correlation belongs to a *pair* of columns, and naming one
+    half of that pair is not an attribution: "revenue correlates at 0.72"
+    says nothing about what it correlates with. When set, it lists every name
+    a reader would have to write to attribute the fact correctly, and the
+    validator requires all of them rather than any one. It defaults to
+    ``(category,)``, so a single-level fact needs nothing extra.
     """
 
     label: str
@@ -137,6 +145,7 @@ class Fact:
     category: str | None = None
     category_column: str | None = None
     family: str | None = None
+    category_names: tuple[str, ...] = ()
 
 
 @dataclass
@@ -576,6 +585,11 @@ def _correlation_summary(
         facts.append(Fact(
             f"correlation between {pair['column_a']} and {pair['column_b']}",
             float(pair["correlation"]),
+            category=f"{pair['column_a']} and {pair['column_b']}",
+            category_names=(pair["column_a"], pair["column_b"]),
+            # Every coefficient in this section is a direct alternative to
+            # every other one: same statistic, different pair of columns.
+            family="correlation",
         ))
 
     if not significant:
@@ -620,7 +634,22 @@ def _regression_lines(
             f"{_fmt(reg.coefficient)} change in '{y_col}' — an association in this "
             "data, not a causal effect."
         )
-        facts.append(Fact(f"regression coefficient of {y_col} on {x_col}", round(reg.coefficient, 6)))
-        facts.append(Fact(f"regression intercept of {y_col} on {x_col}", round(reg.intercept, 6)))
-        facts.append(Fact(f"regression R2 of {y_col} on {x_col}", round(reg.r2, 6)))
+        # Each regression figure is attributable only by naming both columns,
+        # and the three statistics are separate families: an R^2 is not an
+        # alternative reading of a coefficient, so confusing them is a
+        # different error than confusing two pairs.
+        pair_label = f"{y_col} on {x_col}"
+        pair_names = (x_col, y_col)
+        for stat, raw_value in (
+            ("coefficient", reg.coefficient),
+            ("intercept", reg.intercept),
+            ("r2", reg.r2),
+        ):
+            facts.append(Fact(
+                f"regression {'R2' if stat == 'r2' else stat} of {pair_label}",
+                round(float(raw_value), 6),
+                category=pair_label,
+                category_names=pair_names,
+                family=f"regression::{stat}",
+            ))
     return lines
