@@ -163,3 +163,109 @@ def test_both_providers_inject_the_same_system_prompt():
         assert messages[0]["content"] == ANSWER_SYSTEM_PROMPT
         assert "FACTS" in messages[1]["content"]
         assert "how many rows?" in messages[1]["content"]
+
+
+# ── Reasoning models: <think> must never reach the user or the validator ────
+
+def test_strip_reasoning_removes_a_complete_think_block():
+    from app.llm.reasoning import strip_reasoning
+
+    assert strip_reasoning(
+        "<think>Maybe 1234? No, that's the row count.</think>The mean is 42.0."
+    ) == "The mean is 42.0."
+
+
+def test_strip_reasoning_leaves_an_ordinary_answer_untouched():
+    from app.llm.reasoning import strip_reasoning
+
+    text = "The mean revenue is 221.89, and 3 < 5 for the median."
+    assert strip_reasoning(text) == text
+
+
+def test_an_unterminated_think_block_yields_no_answer():
+    # A model cut off mid-thought never produced an answer. Emitting the
+    # scratchpad instead would be worse than emitting nothing: the UI has a
+    # "response cut off" state, and the validator would score the scratchpad.
+    from app.llm.reasoning import strip_reasoning
+
+    assert strip_reasoning("<think>still deciding, maybe 9999") == ""
+
+
+def test_reasoning_filter_survives_a_tag_split_across_chunks():
+    # The real failure mode in streaming: "<think>" arrives as "<thi" + "nk>".
+    # A naive per-chunk replace would pass the scratchpad straight through.
+    from app.llm.reasoning import ReasoningFilter
+
+    f = ReasoningFilter()
+    chunks = ["The answer", " is", "<thi", "nk>discard 9", "99</thi", "nk> 42.0."]
+    out = "".join(f.feed(c) for c in chunks) + f.flush()
+    assert out == "The answer is 42.0."
+    assert "999" not in out
+
+
+def test_reasoning_filter_handles_several_blocks():
+    from app.llm.reasoning import ReasoningFilter
+
+    f = ReasoningFilter()
+    out = f.feed("<think>a</think>One.<think>b</think> Two.") + f.flush()
+    assert out == "One. Two."
+
+
+def test_scratchpad_numbers_would_otherwise_be_scored_as_unsupported():
+    # The reason this module exists, asserted rather than described: a
+    # reasoning model's discarded figures match no fact, so every one of them
+    # becomes an "unsupported" claim about an answer that is in fact correct.
+    import pandas as pd
+
+    from app.llm.context import build_context
+    from app.llm.reasoning import strip_reasoning
+    from app.llm.validation import validate_answer
+
+    df = pd.DataFrame({"revenue": [100.0, 200.0, 300.0, 400.0] * 25})
+    context = build_context(df)
+    mean = df["revenue"].mean()
+    raw = (
+        f"<think>Could be 918273.0, or maybe 45678.0? Let me recompute.</think>"
+        f"The average revenue is {mean:.1f}."
+    )
+
+    before = validate_answer(raw, context)
+    after = validate_answer(strip_reasoning(raw), context)
+
+    assert before.unsupported_count == 2      # both scratchpad figures
+    assert after.unsupported_count == 0
+    assert after.verified_count == 1
+    assert after.trustworthy is True
+
+
+def _fake_provider(text: str, chunks: list[str] | None = None):
+    """Minimal concrete LLMProvider, to test the base class's own behaviour."""
+    from app.llm.base import LLMProvider
+
+    class _Fake(LLMProvider):
+        def generate(self, prompt, system_prompt=None):
+            return text
+
+        def generate_stream(self, prompt, system_prompt=None):
+            yield from (chunks if chunks is not None else [text])
+
+        def is_available(self):
+            return True
+
+        @property
+        def name(self):
+            return "fake"
+
+    return _Fake()
+
+
+def test_answer_question_strips_reasoning_for_every_provider():
+    # Applied in the base class on purpose: a provider added later inherits
+    # it rather than having to remember.
+    provider = _fake_provider("<think>scratch 999</think>The mean is 42.0.")
+    assert provider.answer_question("q", "ctx") == "The mean is 42.0."
+
+
+def test_answer_question_stream_strips_reasoning_across_chunk_boundaries():
+    provider = _fake_provider("", ["<thi", "nk>scratch 999</thi", "nk>Mean", " 42.0."])
+    assert "".join(provider.answer_question_stream("q", "ctx")) == "Mean 42.0."

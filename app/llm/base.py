@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 
+from .reasoning import ReasoningFilter, strip_reasoning
+
 # The system prompt is the first line of defence against a confident wrong
 # answer. Its job is to make "the data does not say" a cheaper response for
 # the model than inventing a figure — small local models default to filling
@@ -78,10 +80,23 @@ class LLMProvider(ABC):
             "default."
         )
 
+    # Both answer paths strip a reasoning model's <think> block. It is done
+    # here rather than at either call site so the two cannot drift, and so
+    # anything that grows a third consumer inherits it. See
+    # app/llm/reasoning.py for why leaving it in would corrupt validation.
     def answer_question(self, question: str, data_context: str) -> str:
-        return self.generate(self._build_prompt(question, data_context),
-                             system_prompt=ANSWER_SYSTEM_PROMPT)
+        return strip_reasoning(
+            self.generate(self._build_prompt(question, data_context),
+                          system_prompt=ANSWER_SYSTEM_PROMPT)
+        )
 
     def answer_question_stream(self, question: str, data_context: str) -> Iterator[str]:
-        yield from self.generate_stream(self._build_prompt(question, data_context),
-                                        system_prompt=ANSWER_SYSTEM_PROMPT)
+        reasoning = ReasoningFilter()
+        for chunk in self.generate_stream(self._build_prompt(question, data_context),
+                                          system_prompt=ANSWER_SYSTEM_PROMPT):
+            visible = reasoning.feed(chunk)
+            if visible:
+                yield visible
+        tail = reasoning.flush()
+        if tail:
+            yield tail
