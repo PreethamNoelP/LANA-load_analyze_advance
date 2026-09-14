@@ -40,6 +40,11 @@ docs/*TEXTBOOK*.md
 # Chat sessions
 chats/
 
+# Persisted session data (SQLite index + Parquet frames) — only written when
+# LANA_PERSIST_SESSIONS=true, and even then it is the user's own uploaded
+# data made durable across restarts, never something to commit.
+/data/
+
 # Generated plots (export outputs — but allow docs/screenshots/)
 *.pdf
 *.docx

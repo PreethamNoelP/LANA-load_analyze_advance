@@ -16,12 +16,14 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from app.data.lineage import CleaningLedger
 from app.data.profile import ColumnProfile, profile_dataframe
+from backend.persistence import PersistenceBackend
 
 ORIGINAL = "original"
 CLEANED = "cleaned"
@@ -184,19 +186,59 @@ class Session:
 
 
 class SessionStore:
-    """Thread-safe LRU store bounded by session count, bytes and idle time."""
+    """Thread-safe LRU store bounded by session count, bytes and idle time.
+
+    ``persist_dir``, when set, makes sessions survive a process restart: every
+    create/clean/version-switch is mirrored to disk (SQLite index + Parquet
+    frames, see ``backend.persistence``), and the store repopulates itself
+    from there on the next startup. ``None`` (the default) keeps the store
+    exactly as in-memory-only as before this existed.
+    """
 
     def __init__(
         self,
         max_sessions: int = 30,
         max_bytes: int = 2 * 1024 ** 3,
         ttl_seconds: float = 3600.0,
+        persist_dir: str | Path | None = None,
     ) -> None:
         self.max_sessions = max_sessions
         self.max_bytes = max_bytes
         self.ttl_seconds = ttl_seconds
         self._sessions: OrderedDict[str, Session] = OrderedDict()
         self._lock = threading.RLock()
+        self._persist = PersistenceBackend(Path(persist_dir)) if persist_dir else None
+        if self._persist is not None:
+            # No lock taken: construction is not yet visible to any other
+            # thread, so the `_locked` methods below are safe to call directly.
+            self._load_persisted()
+
+    def _load_persisted(self) -> None:
+        """Populate the in-memory store from disk at startup.
+
+        Oldest-used first, so the session that was most recently active
+        before shutdown ends up at the LRU tail (least likely to be the one
+        evicted if the reloaded set already exceeds the configured bounds).
+
+        A session's persisted ``last_used`` is a ``time.monotonic()`` reading
+        from the *previous* process — that clock's reference point is not
+        comparable across process boundaries, so reusing it here would make
+        every restored session look arbitrarily old (or new) against this
+        process's own clock. Every restored session is instead treated as
+        freshly used as of this startup.
+        """
+        loaded = sorted(self._persist.load_all(), key=lambda r: r["last_used"])
+        for rec in loaded:
+            session = Session(session_id=rec["session_id"], filename=rec["filename"], raw=rec["raw"])
+            if rec["cleaned"] is not None:
+                session.set_cleaned(rec["cleaned"], rec["ledger"] or CleaningLedger())
+            try:
+                session.set_version(rec["active_version"])
+            except ValueError:
+                pass  # persisted as "cleaned" but no cleaned frame survived — stay on original
+            session.last_used = time.monotonic()
+            self._sessions[session.session_id] = session
+        self._evict_locked()
 
     # ── Writing ──────────────────────────────────────────────────────────────
 
@@ -207,6 +249,12 @@ class SessionStore:
             self._sessions.move_to_end(session_id)
             self._evict_locked()
         return session
+
+    def persist(self, session: Session, *, frames: bool = True) -> None:
+        """Mirror a session's current state to disk. A no-op when persistence
+        is disabled, so callers need not check for that themselves."""
+        if self._persist is not None:
+            self._persist.save(session, frames=frames)
 
     # ── Reading ──────────────────────────────────────────────────────────────
 
@@ -242,12 +290,17 @@ class SessionStore:
 
     # ── Eviction ─────────────────────────────────────────────────────────────
 
+    def _forget_persisted(self, session_id: str) -> None:
+        if self._persist is not None:
+            self._persist.delete(session_id)
+
     def _expire_locked(self) -> None:
         if self.ttl_seconds <= 0:
             return
         cutoff = time.monotonic() - self.ttl_seconds
         for sid in [s for s, sess in self._sessions.items() if sess.last_used < cutoff]:
             self._sessions.pop(sid, None)
+            self._forget_persisted(sid)
 
     def _evict_locked(self) -> None:
         """Drop least-recently-used sessions until both bounds are satisfied.
@@ -258,9 +311,11 @@ class SessionStore:
         """
         self._expire_locked()
         while len(self._sessions) > self.max_sessions:
-            self._sessions.popitem(last=False)
+            sid, _ = self._sessions.popitem(last=False)
+            self._forget_persisted(sid)
         while len(self._sessions) > 1 and sum(s.nbytes for s in self._sessions.values()) > self.max_bytes:
-            self._sessions.popitem(last=False)
+            sid, _ = self._sessions.popitem(last=False)
+            self._forget_persisted(sid)
 
     def enforce_limits(self) -> None:
         """Re-check bounds after a session grew (e.g. a cleaned version was added)."""

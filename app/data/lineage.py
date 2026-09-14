@@ -19,7 +19,7 @@ user as "click to undo" — it is not that.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import pandas as pd
@@ -198,6 +198,25 @@ class CleaningLedger:
             "steps": [r.to_dict() for r in self._records],
             "narrative": self.narrative(rows_original),
         }
+
+    # ── Persistence round-trip ───────────────────────────────────────────────
+    # Distinct from `to_dict()`, which is the API-facing summary and is lossy
+    # (it derives fields like `rows_removed` rather than storing them). This
+    # pair serialises every field of every record so a ledger surviving a
+    # restart is identical to the one before it, not just similar to it.
+
+    def to_persisted_dict(self) -> dict[str, Any]:
+        return {
+            "records": [asdict(r) for r in self._records],
+            "skipped": list(self._skipped),
+        }
+
+    @classmethod
+    def from_persisted_dict(cls, data: dict[str, Any]) -> CleaningLedger:
+        ledger = cls()
+        ledger._records = [TransformRecord(**r) for r in data.get("records", [])]
+        ledger._skipped = list(data.get("skipped", []))
+        return ledger
 
     def narrative(self, rows_original: int) -> str:
         """Plain-English account of the pipeline, for reports and LLM context."""

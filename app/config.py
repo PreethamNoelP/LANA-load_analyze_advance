@@ -76,6 +76,15 @@ class LimitsConfig:
     max_concurrent_llm: int = field(
         default_factory=lambda: int(os.getenv("LANA_MAX_CONCURRENT_LLM", "2"))
     )
+    # Off by default: a plain `uvicorn --reload` dev run should not start
+    # writing a data/ directory into a contributor's checkout unannounced.
+    # The Docker image sets this explicitly — see docker-compose.yml — because
+    # there a restart silently losing every session is the worse default.
+    persist_sessions: bool = field(
+        default_factory=lambda: os.getenv("LANA_PERSIST_SESSIONS", "false").lower()
+        in ("1", "true", "yes")
+    )
+    data_dir: str = field(default_factory=lambda: os.getenv("LANA_DATA_DIR", "data"))
 
 
 @dataclass
@@ -83,6 +92,11 @@ class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     allowed_origins: list[str] = field(default_factory=_parse_allowed_origins)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
+    # Empty (the default) disables auth entirely — every endpoint is open, as
+    # LANA has always assumed for a single local user. Set LANA_AUTH_TOKEN to
+    # require `Authorization: Bearer <token>` on every request, e.g. when
+    # running LANA on a machine reachable by more than just you.
+    auth_token: str = field(default_factory=lambda: os.getenv("LANA_AUTH_TOKEN", ""))
 
 
 config = AppConfig()

@@ -1,3 +1,4 @@
+import hmac
 import json
 import logging
 import math
@@ -10,10 +11,10 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -53,6 +54,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Disabled unless LANA_AUTH_TOKEN is set — LANA has always assumed a single
+# local user with no login. This exists for the case where that stops being
+# true (e.g. running on a home server or a shared machine reachable by more
+# than just you), not as a multi-tenant auth system: every request either
+# carries the one shared token or it doesn't, there is no concept of "which
+# user" beyond that. /health stays open so a container healthcheck or the
+# frontend's own liveness poll doesn't need the token wired in separately.
+_AUTH_EXEMPT_PATHS = {"/health"}
+
+
+@app.middleware("http")
+async def _require_auth_token(request: Request, call_next):
+    token = config.auth_token
+    if token and request.url.path not in _AUTH_EXEMPT_PATHS:
+        header = request.headers.get("authorization", "")
+        supplied = header[7:] if header.lower().startswith("bearer ") else ""
+        # Constant-time comparison: a length/early-exit-timing side channel is
+        # a real (if minor) way to help an attacker guess the token.
+        if not hmac.compare_digest(supplied, token):
+            return JSONResponse(
+                {"detail": "Missing or invalid auth token."}, status_code=401
+            )
+    return await call_next(request)
 
 # All read from app.config.config.limits — the single place that reads these
 # env vars, host-adaptive defaults included. Kept as module-level names here
@@ -115,6 +140,7 @@ _store = SessionStore(
     max_sessions=MAX_SESSIONS,
     max_bytes=MAX_SESSION_MB * 1024 * 1024,
     ttl_seconds=SESSION_TTL_SECONDS,
+    persist_dir=config.limits.data_dir if config.limits.persist_sessions else None,
 )
 
 
@@ -282,6 +308,7 @@ async def upload(file: UploadFile = File(...)):
 
     sid = str(uuid.uuid4())
     session = _store.create(sid, file.filename, df)
+    _store.persist(session)
 
     # Profiling is the first thing a data scientist does; surfacing it at
     # upload means the user sees what they are working with before they act.
@@ -729,6 +756,7 @@ def clean_apply(session_id: str, req: CleanReq):
 
     session.set_cleaned(cleaned, ledger)
     _store.enforce_limits()
+    _store.persist(session)
     summary = ledger.summary(len(df))
 
     return _jsonable({
@@ -753,6 +781,8 @@ def set_version(session_id: str, req: VersionReq):
         session.set_version(req.version)
     except ValueError as e:
         raise HTTPException(400, "No cleaned version available. Apply cleaning first.") from e
+    # Metadata only — the frames themselves are unchanged by a version switch.
+    _store.persist(session, frames=False)
     return {"version": req.version}
 
 

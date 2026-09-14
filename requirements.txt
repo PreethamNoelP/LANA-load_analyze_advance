@@ -11,6 +11,7 @@ pandas==3.0.4
 numpy==2.4.6
 openpyxl==3.1.5          # Excel support
 defusedxml==0.7.1        # hardens openpyxl against XML entity-expansion attacks
+pyarrow==24.0.0          # Parquet read/write for optional session persistence
 
 # ── Machine learning ──────────────────────────────────────────────────────────
 scikit-learn==1.9.0
