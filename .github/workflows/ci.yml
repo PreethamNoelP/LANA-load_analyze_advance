@@ -50,6 +50,18 @@ jobs:
       - name: Build
         run: npm run build
 
+  # Builds both images on every push/PR so a Dockerfile break is caught here,
+  # not by the next person trying `docker compose up`. Build-only: this repo
+  # does not publish images anywhere yet.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t lana-backend .
+      - name: Build frontend image
+        run: docker build -t lana-frontend ./frontend
+
   # Dependency advisories are reported, not enforced: a new CVE in a transitive
   # dependency should show up on the next run, but it should not turn every
   # unrelated pull request red until someone can act on it.

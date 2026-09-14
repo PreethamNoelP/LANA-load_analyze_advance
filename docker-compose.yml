@@ -1,0 +1,89 @@
+# Quick start:
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# Assumes Ollama is already running on the host machine (the normal case if
+# you followed the non-Docker Quick Start in README.md) and reachable at
+# host.docker.internal:11434 — Docker Desktop resolves that out of the box;
+# the `extra_hosts` line below makes it resolve on Linux too. Point
+# OLLAMA_HOST elsewhere (e.g. an OpenAI-compatible endpoint) via a .env file
+# in this directory — compose reads it automatically the same way python-dotenv
+# does for a non-Docker run. See .env.example for every variable and what it
+# does; nothing here is Docker-specific except the two below it.
+#
+# Want Ollama itself containerized instead? `docker compose --profile with-ollama up`
+# starts one alongside the app — see the `ollama` service at the bottom. It pulls
+# no model by default; run `docker compose exec ollama ollama pull llama3.1:8b`
+# once it's up, and point LLM_MODEL at whatever you pulled. With that profile,
+# also set OLLAMA_HOST=http://ollama:11434 in your .env — the container-to-container
+# service name, not host.docker.internal.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.3}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-90}
+      LLM_NUM_CTX: ${LLM_NUM_CTX:-8192}
+      LANA_ALLOWED_ORIGINS: ${LANA_ALLOWED_ORIGINS:-http://localhost:8080}
+      LANA_MAX_CONCURRENT_LLM: ${LANA_MAX_CONCURRENT_LLM:-2}
+      LANA_MAX_UPLOAD_MB: ${LANA_MAX_UPLOAD_MB:-}
+      LANA_MAX_SESSION_MB: ${LANA_MAX_SESSION_MB:-}
+      LANA_MAX_SESSIONS: ${LANA_MAX_SESSIONS:-30}
+      LANA_SESSION_TTL_SECONDS: ${LANA_SESSION_TTL_SECONDS:-3600}
+      # Unlike a bare `uvicorn --reload` dev run, the container default is to
+      # persist — a restarted container silently losing every session is a
+      # worse surprise here than the disk cost of keeping them.
+      LANA_PERSIST_SESSIONS: ${LANA_PERSIST_SESSIONS:-true}
+      LANA_AUTH_TOKEN: ${LANA_AUTH_TOKEN:-}
+    volumes:
+      - lana_data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    ports:
+      - "8000:8000"  # direct API access — optional, useful for curl/health checks
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked into the JS bundle at build time — rebuild this image after
+        # changing LANA_AUTH_TOKEN for the new value to take effect.
+        VITE_LANA_AUTH_TOKEN: ${LANA_AUTH_TOKEN:-}
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Opt-in: `docker compose --profile with-ollama up`. Not part of the default
+  # stack because pulling a model inside it is a multi-GB first run — most
+  # people already have Ollama installed on the host per README.md instead.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["with-ollama"]
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
+volumes:
+  lana_data:
+  ollama_data:

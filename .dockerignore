@@ -1,0 +1,26 @@
+.git
+.github
+.venv
+venv
+env
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.coverage
+coverage.xml
+htmlcov
+.env
+.env.*
+!.env.example
+data/
+chats/
+docs/
+tests/
+eval/results
+# Not referenced by this image at all — it has its own build context and its
+# own .dockerignore (frontend/Dockerfile / frontend/.dockerignore).
+frontend/
+*.csv
+*.xlsx
+*.xls
