@@ -81,6 +81,8 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 | 🔒 **100% Local & Private** | No cloud API. No telemetry. No data leaves your machine. |
 | 🎨 **Production UI** | Dark-theme React SPA with a ChatGPT-style chat interface, sessions that survive a page refresh, and confirmation before anything destructive. |
 | 🔌 **Pluggable LLM Backend** | Swap between Ollama and any OpenAI-compatible endpoint (Groq, LM Studio, Together.ai) via `.env`. |
+| 🐳 **Docker-ready** | `docker compose up --build` and open a browser — no local Python/Node setup required. |
+| 💾 **Durable Sessions (opt-in)** | Off by default; set `LANA_PERSIST_SESSIONS=true` (the Docker image's default) and a restart no longer loses your uploads — each session is mirrored to SQLite + Parquet on disk. |
 
 ---
 
@@ -279,7 +281,25 @@ DOCX  → python-docx builds an editable Word document
 
 ## 🛠️ Installation & Setup
 
-### Prerequisites
+### Option A — Docker (fastest)
+
+Prerequisites: [Docker](https://docs.docker.com/get-docker/) and [Ollama](https://ollama.com) running on the host with at least one model pulled (`ollama pull phi3:mini`).
+
+```bash
+git clone https://github.com/PreethamNoelP/LANA-load_analyze_advance.git
+cd LANA-load_analyze_advance
+docker compose up --build
+```
+
+Open **[http://localhost:8080](http://localhost:8080)**. The backend talks to
+Ollama on your host machine (`host.docker.internal:11434`), and sessions
+persist across `docker compose restart` by default — see the comments in
+`docker-compose.yml` for every override, including running Ollama itself in
+a container instead. Skip to [Usage](#️-usage) once it's up.
+
+### Option B — Manual setup
+
+#### Prerequisites
 
 | Requirement | Version |
 |---|---|
@@ -358,16 +378,18 @@ cd frontend && npm run dev
 Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 
 > [!IMPORTANT]
-> **LANA has no authentication, and is built to run on your own machine.**
+> **LANA has no authentication by default, and is built to run on your own machine.**
 > Every endpoint is open to anyone who can reach the port: uploading files,
 > running analysis, generating reports and spending time on your local model.
 > That is the right trade for a single-user local tool, and it is the reason
 > the defaults bind to localhost and the CORS allowlist rejects `*`.
 >
-> Do not run it with `--host 0.0.0.0`, behind a public reverse proxy, or on a
-> shared network without putting authentication in front of it yourself. The
-> upload and request-size limits are there to keep a mistake from taking the
-> machine down — they are not a substitute for access control.
+> Running it somewhere more than just you can reach it — a home server, a
+> shared machine on your LAN? Set `LANA_AUTH_TOKEN` (see `.env.example`) to
+> require a shared secret on every request. It is one token for the whole
+> app, not a login system — anyone holding it has full access. The upload
+> and request-size limits are there to keep a mistake from taking the
+> machine down; they are not a substitute for access control either way.
 
 ### User flow
 
@@ -431,7 +453,7 @@ Restart the backend — no other changes required.
 | Chart types | 9 |
 | Statistical metrics per column | 15+, with 95% confidence intervals |
 | Cleaning operations | Dedup, null fill, dual-rule outlier detection (IQR + MAD), winsorize, text normalization — every step logged, most non-destructive by default. Undo is switching the whole session back to the original version; there is no per-step undo. |
-| Test suite | 156 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
+| Test suite | 181 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
 | Data privacy | 100% — zero external network calls |
 
 ---

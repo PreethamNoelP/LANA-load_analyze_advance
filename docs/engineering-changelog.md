@@ -569,3 +569,85 @@ the stale `.ruff_cache` that started this whole thread.
 coverage, `validation.py` at 92%, overall 87%. The adversarial suite is 13/16
 with attribution at 4/4 and `numeric_fabrication` still 9/9; the three misses
 remain the `in_range` and `causal` buckets named as out of scope.
+
+---
+
+## 2026-09-14 — Docker packaging, opt-in session persistence, opt-in auth token
+
+**Problem.** LANA had no path from "clone the repo" to "running instance"
+that didn't involve a Python venv and a separate Node toolchain — a real
+barrier for anyone who just wants to try it. Two gaps sat next to that:
+every session lived only in the process's memory (a restart silently lost
+every upload), and every endpoint was open to anyone who could reach the
+port, which is fine for one person on their own laptop and wrong the moment
+LANA runs somewhere more than just that one person can reach.
+
+**Solution — packaging.** `Dockerfile` (backend) and `frontend/Dockerfile`
+(multi-stage: `vite build`, served by nginx) plus `docker-compose.yml`.
+nginx performs the same `/api/*` prefix-stripping the Vite dev proxy already
+did (`frontend/nginx.conf`), so `frontend/src/api.js` needed no
+production-specific branch. `docker compose up --build` now gets a working
+instance talking to Ollama on the host (`host.docker.internal`, with the
+Linux `extra_hosts` shim Docker Desktop doesn't need but doesn't mind
+either). An `ollama` service exists behind a `with-ollama` profile for
+anyone who'd rather containerize that too, off by default because pulling a
+model inside it is a multi-GB first run most people don't want.
+
+**Solution — persistence.** `backend/persistence.py`: a SQLite index
+(session_id, filename, active_version, last_used, has_cleaned) plus one
+Parquet file per stored frame — Parquet, not CSV, because it round-trips
+dtypes exactly, and a column LANA parsed as datetime or category must not
+come back as a string after a restart. `SessionStore` gained an optional
+`persist_dir`; when set, every create/clean-apply mirrors to disk and every
+eviction/expiry deletes the mirror too, so disk usage tracks the in-memory
+LRU rather than growing unbounded. `CleaningLedger` gained
+`to_persisted_dict`/`from_persisted_dict`, deliberately separate from the
+existing `to_dict()` — that one is the lossy API-facing summary, this one
+round-trips every field of every `TransformRecord` exactly.
+
+Off by default (`LANA_PERSIST_SESSIONS=false`): a plain `uvicorn --reload`
+dev run should not start writing a `data/` directory into a contributor's
+checkout with no announcement. The Docker image sets it to `true` with a
+named volume, because there a restart silently losing every session is the
+worse default. A subtlety that would have been a real bug: `Session.last_used`
+is `time.monotonic()`, whose reference point is undefined across process
+boundaries — reusing a persisted reading after a restart would compare it
+against a new process's clock and could make a just-restored session look
+arbitrarily stale (or immune to TTL expiry) for the wrong reason. Every
+restored session is instead stamped `last_used = time.monotonic()` (now) at
+load time, discarding the old reading rather than trusting it.
+
+**Solution — auth.** An `LANA_AUTH_TOKEN` env var, checked by ASGI
+middleware in `backend/main.py` via `hmac.compare_digest` against the
+`Authorization: Bearer` header, with `/health` exempt so a container
+healthcheck doesn't need it wired in separately. This is a single shared
+secret, not a login system — anyone holding it has full access, and there
+is no per-user concept. Off by default, same reasoning as persistence: it
+changes nothing for the single-local-user case LANA has always assumed.
+The frontend reads the token from `VITE_LANA_AUTH_TOKEN`, baked in at Vite
+build time (`import.meta.env` only exposes what existed when `vite build`
+ran) — which meant the three export buttons, previously plain `<a href
+download>` links, had to become fetch-then-blob downloads
+(`downloadCsv`/`downloadPdf`/`downloadDocx` in `frontend/src/api.js`): a
+bare anchor click cannot carry a custom `Authorization` header, so enabling
+the token would otherwise have silently broken every export.
+
+**Tests.** `tests/test_persistence.py`, 13 new cases: `PersistenceBackend`
+save/load round-trips (including a cleaned version with a ledger, and a
+metadata-only save that must not rewrite frames), a simulated restart via
+two `SessionStore` instances pointed at the same directory, eviction
+deleting the on-disk mirror, a corrupted/missing raw frame being skipped
+and cleaned up rather than failing startup, and the auth middleware's four
+states (exempt path, no token, wrong token, correct token) plus confirming
+the default stays fully open. 181 backend tests total, up from 168; the
+existing 168 pass unchanged since persistence defaults to off and no route
+signature changed.
+
+**Not done here.** No CI job builds or pushes the Docker images yet — this
+round only verified the Dockerfiles by inspection and ran the app directly
+via the existing dev servers, since Docker was not available in the
+environment this was built in. Rotating `LANA_AUTH_TOKEN` requires
+rebuilding the frontend image (the token is baked in, not read at
+container start). Multi-worker/multi-replica deployment still isn't
+supported — the session store is still one process's in-memory dict with a
+disk mirror, not a shared external store.
