@@ -1,5 +1,16 @@
 const BASE = '/api'
 
+// Empty unless the frontend was built with VITE_LANA_AUTH_TOKEN set (see
+// frontend/Dockerfile) — Vite only exposes import.meta.env.VITE_* variables
+// that existed at build time, so this can't be changed at runtime. Matches
+// the backend's LANA_AUTH_TOKEN gate, which is off by default (every
+// endpoint open) and only enforced when that variable is set server-side.
+const AUTH_TOKEN = import.meta.env.VITE_LANA_AUTH_TOKEN || ''
+
+function withAuthHeader(headers) {
+  return AUTH_TOKEN ? { ...headers, Authorization: `Bearer ${AUTH_TOKEN}` } : headers
+}
+
 // Nothing here may hang forever. Without a deadline a stalled connection
 // leaves a caller's loading state on permanently — during session restore
 // that meant a blank screen with no spinner and no way out.
@@ -32,11 +43,15 @@ export class ApiError extends Error {
   }
 }
 
-async function request(path, { timeoutMs = DEFAULT_TIMEOUT_MS, ...init } = {}) {
+async function request(path, { timeoutMs = DEFAULT_TIMEOUT_MS, headers, ...init } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(`${BASE}${path}`, { ...init, signal: controller.signal })
+    return await fetch(`${BASE}${path}`, {
+      ...init,
+      headers: withAuthHeader(headers),
+      signal: controller.signal,
+    })
   } catch (e) {
     if (e.name === 'AbortError') {
       throw new ApiError(
@@ -86,7 +101,7 @@ export async function* streamQuery(sessionId, question) {
   try {
     res = await fetch(`${BASE}/query/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: withAuthHeader({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ session_id: sessionId, question }),
     })
   } catch {
@@ -175,9 +190,36 @@ export async function getValidatorCapabilities() {
   return ok(await request('/validator/capabilities'))
 }
 
-export function exportCsvUrl(sessionId)  { return `${BASE}/export/csv/${sessionId}` }
-export function exportPdfUrl(sessionId)  { return `${BASE}/export/pdf/${sessionId}` }
-export function exportDocxUrl(sessionId) { return `${BASE}/export/docx/${sessionId}` }
+// A plain `<a href={...}>` can't carry the Authorization header, so exports
+// are fetched here and handed to the browser as a Blob — the same pattern
+// getChartBlob already uses, and the only one that still works once
+// LANA_AUTH_TOKEN is enabled.
+async function downloadFile(path, filename) {
+  const res = await request(path, { timeoutMs: ANALYSIS_TIMEOUT_MS })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new ApiError(err.detail || res.statusText, { status: res.status })
+  }
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+export function downloadCsv(sessionId) {
+  return downloadFile(`/export/csv/${encodeURIComponent(sessionId)}`, 'lana_data.csv')
+}
+export function downloadPdf(sessionId) {
+  return downloadFile(`/export/pdf/${encodeURIComponent(sessionId)}`, 'lana_report.pdf')
+}
+export function downloadDocx(sessionId) {
+  return downloadFile(`/export/docx/${encodeURIComponent(sessionId)}`, 'lana_report.docx')
+}
 
 export async function getCleanPreview(sessionId) {
   return ok(await request(`/clean/preview/${encodeURIComponent(sessionId)}`,
