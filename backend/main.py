@@ -255,37 +255,44 @@ async def upload(file: UploadFile = File(...)):
 
     try:
         # Admission is decided before the parse, not after it. Projecting the
-        # frame's cost from a small sample means an unaffordable file is
-        # refused with a number the user can act on, rather than the process
-        # being killed halfway through materialising it.
-        if ext == ".csv":
-            projection = await run_in_threadpool(
-                ingest.project_csv_frame_bytes, spool, total
-            )
+        # frame's cost means an unaffordable file is refused with a number the
+        # user can act on, rather than the process being killed halfway
+        # through materialising it.
+        #
+        # Every format goes through this, not just CSV. Excel and JSON cannot
+        # be sampled the way CSV can, so their projections are coarser (see
+        # ingest.project_frame_bytes) — but a coarse gate on the formats that
+        # can carry a decompression bomb beats the previous arrangement, where
+        # an .xlsx declaring gigabytes of sheet XML was admitted unexamined
+        # purely because it compressed down under the upload limit.
+        projection = await run_in_threadpool(
+            ingest.project_frame_bytes, spool, ext, total
+        )
+        if projection is not None:
             budget = MAX_SESSION_MB * 1024 * 1024
-            if projection and projection[0] > budget:
-                projected_mb = projection[0] / 1024 ** 2
+            if projection.frame_bytes > budget:
+                projected_mb = projection.frame_bytes / 1024 ** 2
+                scale = f" ({projection.rows:,} rows)" if projection.rows else ""
                 raise HTTPException(
                     413,
-                    f"This file would need about {projected_mb:,.0f} MB of memory "
-                    f"({projection[1]:,} rows), and the budget on this machine is "
-                    f"{MAX_SESSION_MB:,} MB. Upload a subset of the columns or rows, "
-                    f"or raise LANA_MAX_SESSION_MB if you have headroom.",
+                    f"This file would need about {projected_mb:,.0f} MB of memory"
+                    f"{scale} — {projection.basis} — and the budget on this machine "
+                    f"is {MAX_SESSION_MB:,} MB. Upload a subset of the columns or "
+                    f"rows, or raise LANA_MAX_SESSION_MB if you have headroom.",
                 )
             # Second gate, against the machine's state *now* rather than at
             # startup. Refusing here keeps LANA from being the process that
             # pushes a laptop into swapping.
-            if projection:
-                needed = int(projection[0] * UPLOAD_PEAK_MULTIPLIER)
-                ok, free = can_admit(needed)
-                if not ok:
-                    raise HTTPException(
-                        503,
-                        f"Not enough free memory right now: parsing this file needs "
-                        f"roughly {needed / 1024 ** 2:,.0f} MB and only "
-                        f"{free / 1024 ** 2:,.0f} MB is free. Close some applications "
-                        f"and try again, or upload a smaller extract.",
-                    )
+            needed = int(projection.frame_bytes * UPLOAD_PEAK_MULTIPLIER)
+            ok, free = can_admit(needed)
+            if not ok:
+                raise HTTPException(
+                    503,
+                    f"Not enough free memory right now: parsing this file needs "
+                    f"roughly {needed / 1024 ** 2:,.0f} MB and only "
+                    f"{free / 1024 ** 2:,.0f} MB is free. Close some applications "
+                    f"and try again, or upload a smaller extract.",
+                )
 
         try:
             # Parsing runs in a worker thread — pandas' readers are synchronous
@@ -631,6 +638,69 @@ def models():
 CSV_EXPORT_CHUNK_ROWS = 50_000
 
 
+# Characters that make a spreadsheet treat a cell as a formula rather than as
+# text. Excel, LibreOffice and Sheets all evaluate these on open, so a value
+# that arrived in an upload — from a file LANA did not write and cannot vouch
+# for — must not be handed back in a form that executes.
+_FORMULA_TRIGGERS = ("=", "+", "@", "\t", "\r")
+
+
+def _escape_formula_cells(block: pd.DataFrame) -> pd.DataFrame:
+    """Neutralise text cells a spreadsheet would execute as a formula.
+
+    Two deliberate narrowings, both to avoid corrupting real data in a tool
+    whose whole point is reporting it faithfully:
+
+    * **Only text columns.** A numeric column's -5.2 is a number, and
+      prefixing it would turn every negative value in an export into a string.
+    * **A leading '-' is judged on what follows.** It begins both every
+      negative number and a known payload (`-1+1+cmd|' /C calc'!A0`), so a
+      value that parses as a number is left exactly as it was and anything
+      else is escaped.
+
+    Escaped cells are prefixed with an apostrophe, which is the convention
+    every spreadsheet understands as "this is text". That does change the
+    value on a round-trip back into LANA, which is why it is applied to as few
+    cells as correctness allows.
+    """
+    text_columns = block.select_dtypes(include=["object", "string", "category"]).columns
+    if len(text_columns) == 0:
+        return block
+
+    escaped: pd.DataFrame | None = None
+    for column in text_columns:
+        values = block[column]
+        if isinstance(values.dtype, pd.CategoricalDtype):
+            values = values.astype("object")
+        try:
+            as_text = values.astype("string")
+        except (TypeError, ValueError):
+            continue  # a column of unhashable/exotic objects — nothing str-like to escape
+
+        first = as_text.str[:1]
+        flagged = first.isin(_FORMULA_TRIGGERS).fillna(False)
+        minus = (first == "-").fillna(False)
+        if minus.any():
+            # Vectorised, so the "is this just a negative number?" test costs
+            # one pass rather than a Python call per cell.
+            numeric_like = pd.to_numeric(as_text.where(minus), errors="coerce").notna()
+            flagged = flagged | (minus & ~numeric_like)
+        if not flagged.any():
+            continue
+
+        if escaped is None:
+            # Copied lazily and per block, so the streaming export keeps its
+            # bounded memory: at most one 50,000-row block is duplicated, and
+            # only when that block actually contains something to escape.
+            escaped = block.copy()
+        # Substituted into the original column rather than replacing it with
+        # the stringified copy, so every cell that was not flagged stays
+        # byte-identical to what was uploaded.
+        escaped[column] = values.mask(flagged, "'" + as_text)
+
+    return escaped if escaped is not None else block
+
+
 def _csv_chunks(df: pd.DataFrame):
     """Serialise a frame to CSV in row blocks, yielding encoded bytes.
 
@@ -653,7 +723,7 @@ def _csv_chunks(df: pd.DataFrame):
     header = True
     for start in range(0, len(df), CSV_EXPORT_CHUNK_ROWS):
         block = df.iloc[start:start + CSV_EXPORT_CHUNK_ROWS]
-        yield block.to_csv(index=False, header=header).encode("utf-8")
+        yield _escape_formula_cells(block).to_csv(index=False, header=header).encode("utf-8")
         header = False
 
 
