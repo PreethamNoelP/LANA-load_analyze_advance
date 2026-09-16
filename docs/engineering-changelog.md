@@ -651,3 +651,86 @@ rebuilding the frontend image (the token is baked in, not read at
 container start). Multi-worker/multi-replica deployment still isn't
 supported — the session store is still one process's in-memory dict with a
 disk mirror, not a shared external store.
+
+---
+
+## 2026-09-16 — Two holes an outside reader would find first, and a stated threat model
+
+**Problem.** An audit of the repo turned up two defects that had been sitting
+in public, both of the kind a security-minded reader checks within the first
+ten minutes: CSV export wrote cell values verbatim, and the pre-parse memory
+gate only covered CSV. Neither was exotic. Both were worse *after* the Docker
+packaging landed, because that work exists precisely to get more people
+running and reading this.
+
+**CSV formula injection.** `_csv_chunks` handed every value straight to
+`to_csv`. A cell reading `=HYPERLINK(...)` — arriving in an upload, from a
+file LANA did not write — became a live formula when the export was opened in
+Excel, LibreOffice or Sheets. That is a code-execution path that runs on the
+machine of whoever opens the report, who may not be the person who uploaded
+the data.
+
+The fix escapes `=`, `+`, `@`, tab and CR with a leading apostrophe. The part
+worth writing down is what it deliberately does *not* do, because the obvious
+implementation corrupts real data:
+
+- **Only text columns are touched.** OWASP's list includes `-`, and a numeric
+  column is full of negative numbers. Escaping those would put an apostrophe
+  in front of every negative value LANA exports — in a tool whose entire
+  claim is reporting numbers faithfully.
+- **Inside a text column, a leading `-` is judged on what follows.** `-5.2`
+  parses as a number and is left byte-identical; `-1+1+cmd|' /C calc'!A0`
+  does not and is escaped. The test suite pins both directions, because the
+  failure mode here is silent data corruption rather than a crash.
+- **Only flagged cells are substituted**, into the original column rather
+  than a stringified copy of it, so every untouched value stays exactly as it
+  was uploaded. The escape runs per 50,000-row block, preserving the bounded
+  memory the streaming export was built for, and copies a block only when
+  that block actually contains something to escape.
+
+**The asymmetric admission gate.** CSV uploads were costed from a sampled
+projection before parsing; `.xlsx` and `.json` skipped the check entirely and
+were bounded only by the compressed upload limit. An `.xlsx` is a zip, so that
+is the wrong bound by roughly an order of magnitude: measured here, an
+ordinary workbook compresses 8.2x, and a deliberately crafted one compresses
+arbitrarily.
+
+Excel and JSON cannot be sampled the way CSV can — both parsers must see the
+whole document before producing anything — so the projection uses what is
+knowable without parsing. For `.xlsx` that is the uncompressed size the
+archive's own central directory declares, read with one seek and no
+inflation, which is what makes a decompression bomb cheap to refuse instead
+of expensive to discover. The multipliers converting that into a frame
+estimate were measured on a 60,000-row mixed frame (uncompressed XML ran 4.1x
+the resulting frame; a JSON document 1.3x) and then set deliberately above
+what those ratios imply. Refusing a file that would have fit is an error the
+user can see and override; being OOM-killed partway through materialising one
+is not.
+
+Worth noting what this is not: the bomb defence falls out of the ordinary
+budget check rather than being special-cased. A file declaring 50 GB of sheet
+XML projects a frame far past any budget and is refused by the same code path
+that refuses an honestly large CSV — one gate, one meaning.
+
+**SECURITY.md.** Added, and deliberately not a disclaimer. It states the scope
+(single-user, local-first, no auth by default, and why that is a decision
+rather than an omission), what to do when that stops being true
+(`LANA_AUTH_TOKEN` plus TLS), what LANA does protect against, and — the part
+that matters — what it knowingly does not: no per-session ownership,
+unencrypted persisted data, prompt injection through cell contents only
+partly mitigated, no rate limiting. A reader should not have to derive that
+list from the source, and "no auth?!" is a better conversation to have in a
+document than in an issue thread.
+
+**Tests.** 204 backend tests, up from 181. `tests/test_export_safety.py` (13)
+covers five payload shapes plus the four ways the fix could mangle legitimate
+data; `tests/test_upload_admission.py` (10) covers the archive probe, a real
+zip bomb, the over-estimate direction against an actual parse, and end-to-end
+413s for Excel and JSON. Verified against a running server as well as under
+pytest: a formula payload came back escaped and `-5.2` came back unchanged.
+
+**Not done here.** `.xls` is still accepted by the extension allowlist but
+cannot actually be parsed — `xlrd` is not in requirements.txt, so those
+uploads fail at the parser with a dependency error rather than being refused
+up front. Separate bug, found while working on this, left alone rather than
+folded in silently.

@@ -390,6 +390,9 @@ Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 > app, not a login system — anyone holding it has full access. The upload
 > and request-size limits are there to keep a mistake from taking the
 > machine down; they are not a substitute for access control either way.
+>
+> [`SECURITY.md`](SECURITY.md) states the full threat model: what LANA does
+> protect against, what it knowingly does not, and how to report a problem.
 
 ### User flow
 
@@ -453,7 +456,7 @@ Restart the backend — no other changes required.
 | Chart types | 9 |
 | Statistical metrics per column | 15+, with 95% confidence intervals |
 | Cleaning operations | Dedup, null fill, dual-rule outlier detection (IQR + MAD), winsorize, text normalization — every step logged, most non-destructive by default. Undo is switching the whole session back to the original version; there is no per-step undo. |
-| Test suite | 181 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
+| Test suite | 204 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
 | Data privacy | 100% — zero external network calls |
 
 ---
