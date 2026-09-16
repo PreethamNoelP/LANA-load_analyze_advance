@@ -114,6 +114,17 @@ drift from what the code does.
   leaving out one of the two columns the figure actually came from.
   Naming half a pair is treated as too vague to be a mislabelling, not
   as an error.
+- A number is not accepted as verified purely because it lands within
+  tolerance of some fact elsewhere in the context. Where the sentence
+  explicitly names a different column from the one the matched statistic
+  belongs to, and never names that statistic's own column, the match is
+  reported as a collision rather than a verification.
+- An average or median presented for a column it could not have come
+  from is refused outright: min <= mean <= max holds for every column, so
+  a central value outside its own column's observed range is impossible
+  rather than merely unlikely. The same applies to any central value
+  claimed for an identifier column, for which LANA computes no mean,
+  median or standard deviation at all.
 
 **Does not verify:**
 - A real, correctly-computed number attached to the wrong label, where
@@ -133,9 +144,13 @@ drift from what the code does.
   common for correlation coefficients, which cluster — naming that
   sibling is accepted rather than flagged, because it is a defensible
   reading of the same number.
-- A wrong-but-plausible value that happens to fall inside a column's
-  observed range. It is marked 'derived' rather than flagged, because a
-  legitimate calculation can land anywhere in that range too.
+- A wrong-but-plausible value that falls inside the range of the column
+  it is attributed to. It is marked 'derived' rather than flagged,
+  because a legitimate calculation can land anywhere in that range too.
+  Only a central value *outside* that column's range is refused, and
+  only when the sentence attributes it unambiguously — a mention with
+  another number between it and this one is treated as too ambiguous to
+  conclude anything from.
 - A non-numeric claim — a causal statement, a comparison, a
   recommendation — with no number in it to extract and check at all.
 - Instructions hidden in the uploaded data itself. Category values are

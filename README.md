@@ -450,13 +450,13 @@ Restart the backend — no other changes required.
 | Time to first AI insight | < 30s from upload (or instant, via the bundled sample dataset) |
 | Chart generation latency | ~1–2s (server-side render, sampled above 50k points) |
 | LLM response (phi3:mini, CPU) | ~3–8s |
-| Grounded answer accuracy, measured | 82.5% correct on a 40-question benchmark vs. 52.5% for an ungrounded baseline — same model, same questions (`eval/`, see `docs/engineering-changelog.md`) |
+| Grounded answer accuracy, measured | 82.5% correct on a 40-question benchmark vs. 52.5% for an ungrounded baseline — same model (phi3:mini), same questions (`eval/`, see `docs/engineering-changelog.md`). One model is an anecdote: run `python -m eval.run --models llama3.1:8b,mistral:7b,phi3:mini` to reproduce it across several and print the comparison table. |
 | Supported input formats | CSV, Excel `.xlsx`/`.xls`, JSON |
 | Export formats | CSV (streamed), PDF, DOCX — each carrying the cleaning provenance behind the numbers |
 | Chart types | 9 |
 | Statistical metrics per column | 15+, with 95% confidence intervals |
 | Cleaning operations | Dedup, null fill, dual-rule outlier detection (IQR + MAD), winsorize, text normalization — every step logged, most non-destructive by default. Undo is switching the whole session back to the original version; there is no per-step undo. |
-| Test suite | 204 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
+| Test suite | 239 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
 | Data privacy | 100% — zero external network calls |
 
 ---

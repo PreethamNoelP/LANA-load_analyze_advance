@@ -734,3 +734,96 @@ cannot actually be parsed — `xlrd` is not in requirements.txt, so those
 uploads fail at the parser with a dependency error rather than being refused
 up front. Separate bug, found while working on this, left alone rather than
 folded in silently.
+
+---
+
+## 2026-09-16 — The validator was vouching for wrong answers, and the answer key was grading itself
+
+**Problem.** The project's headline claim is measured, disclosed hallucination
+rates. Two things underneath it did not hold up. First, the validator did not
+merely *miss* some wrong answers — on a known case it reported one as
+**verified**, which is the worse failure by some distance: a warning that never
+fires costs a reader nothing, a "verified" badge on a fabricated number costs
+them the reason they trusted the tool. Second, the eval's answer key was
+computed by calling the same production functions it was grading, so no run
+could ever detect an error in them.
+
+**The identifier hole, and what it exposed.** `eval/cases.py`'s retail-20 asks
+for the average of `order_id`. The prose in the context said "[identifier —
+arithmetic on it is not meaningful]" while the fact ledger cheerfully carried
+`order_id mean`, so the model's answer matched a computed fact and came back
+verified. Telling a model not to do arithmetic while handing it the result of
+that arithmetic was never going to work; identifiers now contribute only the
+facts that mean something for a key — their range — and the mean, median and
+std are absent from the prompt text as well as the ledger.
+
+Fixing that surfaced something bigger. The claim was *still* verified
+afterwards, now by matching `total customer_age for region=west` (5,354 against
+5,249.5, inside the 2% tolerance). Fact matching is global and label-blind: any
+number within tolerance of any of the ~100 facts in a context gets stamped
+verified, whatever the sentence is actually about. The existing attribution
+check could not see it, because that one compares a fact against its
+*siblings* — same statistic, different category — and an unrelated column's
+total is nobody's sibling.
+
+**Two checks, both narrow on purpose.** A collision rule: when the sentence
+explicitly names a known column that is not the matched statistic's, and never
+names that statistic's own column, the match is reported as a collision rather
+than a verification. And a central-value rule: `min <= mean <= max` holds for
+every column, always, so an average outside its own column's observed range is
+impossible rather than unlikely — one of the few places here where "wrong" can
+be concluded from arithmetic instead of a guess. Previously such a claim was
+waved through as "derived", because plausibility was tested against *any*
+column's range, and with eight columns of differing magnitude nearly everything
+falls inside one of them. That is most of why the measured catch rate was 10%.
+
+The precision work is the part worth reading. Both rules fire only on an
+unambiguous attribution, and "unambiguous" had to be defined: a column name
+counts only if no *other* number sits between it and this one. Without that,
+"the average revenue is $345 per order; the average order is 2.3 items" flags
+2.3 as impossible for revenue — a false alarm on a correct answer, which the
+project has held since the beginning costs more trust than a missed flag.
+adv-19 and adv-20 exist to hold that line; without them this change would be
+indistinguishable from a validator that simply flags more things.
+
+**The answer key now grades independently.** `eval/ground_truth.py` computes
+each expected value with numpy and scipy directly, and evaluates LANA's own
+function alongside it. Grading uses the independent figure; a divergence is
+recorded on the result, printed by the runner, and rendered under the
+comparison table, because a disagreement between the two is a finding about
+the product or the harness and not something to resolve silently in either
+direction. It earned its keep on the first run by flagging every correlation
+case — `analyze_correlations` rounds to 4dp for display and scipy does not.
+Presentation, not a defect, but nobody had written it down.
+
+`tests/test_ground_truth_agreement.py` runs that comparison over all 40 cases
+with no model involved, and plants a deliberate disagreement to prove the
+check has teeth — a silently-disabled comparison looks exactly like a passing
+one otherwise.
+
+**Multi-model runs.** `eval/run.py --models a,b,c` runs the suite against each
+in turn and writes a comparison table; rendering lives in `eval/compare.py` as
+a pure function over saved run summaries, so it is covered by the normal test
+suite and can be re-run over results saved weeks apart without touching a
+model. One model is an anecdote — a reader cannot tell whether the grounding
+effect is a property of the pipeline or of phi3:mini's particular failure
+modes.
+
+**Enforcing the doc that claims to mirror the code.** `docs/provenance.md`
+says of itself that it is "not an independent description that could quietly
+drift from what the code does". Nothing checked that, and it had drifted
+twice. `tests/test_docs_match_capabilities.py` now fails when a capability
+statement is missing from it.
+
+**Tests.** 239 backend tests, up from 204. Adversarial suite: 17/20 behaving
+as documented, `numeric_fabrication` now 13/13 at precision 1.00 / recall
+1.00 (was 9/9 over a smaller, easier set), and the `in_range` and `causal`
+blind spots still measured at zero, deliberately.
+
+**Not done here.** The multi-model numbers themselves. No Ollama was reachable
+from the machine this was written on, so the table has tooling and tests but
+no rows — running it needs 3-4 pulled models and roughly ten to forty minutes
+each. The 10% catch rate quoted above is still the last *measured* figure;
+these changes should raise it, and that claim stays unmade until a real run
+says so. Publishing an improved number inferred from the adversarial suite
+would be exactly the kind of unearned claim this round exists to prevent.
