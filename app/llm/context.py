@@ -157,6 +157,11 @@ class GroundedContext:
     column_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
     vocabulary: set[str] = field(default_factory=set)   # column names + category values
     coverage: dict[str, Any] = field(default_factory=dict)
+    # Columns LANA deliberately computes no centre for — identifiers, whose
+    # mean is arithmetic on a label. Carried through to the validator so that
+    # a claimed "average order_id" is refused because no such statistic exists,
+    # rather than being caught only if its value happens to look wrong.
+    centreless_columns: frozenset[str] = frozenset()
 
 
 # Longest category value reproduced in the prompt. Real category labels are
@@ -364,6 +369,9 @@ def build_context(
         column_ranges=ranges,
         vocabulary=vocabulary,
         coverage=coverage,
+        centreless_columns=frozenset(
+            name for name, p in profiles.items() if p.kind is ColumnKind.IDENTIFIER
+        ),
     )
 
 
@@ -393,8 +401,28 @@ def _describe_column(
     if p.is_numeric_measure or p.kind is ColumnKind.IDENTIFIER:
         if p.min is not None and p.max is not None:
             ranges[name] = (p.min, p.max)
-        for label, value in (("min", p.min), ("max", p.max), ("mean", p.mean),
-                             ("median", p.median), ("std", p.std)):
+
+        # An identifier's mean is arithmetic performed on a label. The prose
+        # below has always said so — but the fact ledger did not, and the
+        # ledger is what the validator checks against. A mean fact was emitted
+        # for identifiers like every other numeric column, so "the average
+        # order_id is 5,249.5" matched a computed fact and came back
+        # *verified*: the validator actively vouching for a number that means
+        # nothing. eval case retail-20 graded that same answer as a
+        # hallucination, so the harness and the validator disagreed about the
+        # one question the validator exists to answer.
+        #
+        # Telling the model not to do arithmetic while handing it the result
+        # of that arithmetic was never going to hold. An identifier now
+        # contributes only the facts that mean something for a key — the range
+        # its values span — so a claimed average has nothing to match and is
+        # flagged like any other unsupported figure.
+        identifier = p.kind is ColumnKind.IDENTIFIER
+        summary_stats = (("min", p.min), ("max", p.max)) if identifier else (
+            ("min", p.min), ("max", p.max), ("mean", p.mean),
+            ("median", p.median), ("std", p.std),
+        )
+        for label, value in summary_stats:
             if value is not None:
                 # Grouped by statistic, with the column as the "category": the
                 # siblings of "revenue mean" are every other column's mean, so
@@ -407,14 +435,23 @@ def _describe_column(
                     f"{name} {label}", float(value), column=name,
                     category=name, family=f"stat::{label}",
                 ))
+        note = ""
+        if identifier:
+            # No mean/median/std in the text either. Printing them and then
+            # saying not to use them is an instruction competing with a
+            # number, and the number tends to win.
+            detail = f"{p.unique:,} distinct values spanning {_fmt(p.min)} to {_fmt(p.max)}"
+            note = (
+                " [identifier — arithmetic on it is not meaningful, so no average, "
+                "median or standard deviation is computed for it]"
+            )
+            return f"- '{name}' (identifier): {detail}, {missing}.{note}"
+
         detail = (
             f"range {_fmt(p.min)} to {_fmt(p.max)}, mean {_fmt(p.mean)}, "
             f"median {_fmt(p.median)}, std {_fmt(p.std)}"
         )
-        note = ""
-        if p.kind is ColumnKind.IDENTIFIER:
-            note = " [identifier — arithmetic on it is not meaningful]"
-        elif p.discrete_code:
+        if p.discrete_code:
             vocabulary.update(_safe_value(v) for v, _ in p.top_values)
             for value, count in p.top_values:
                 facts.append(Fact(

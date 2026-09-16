@@ -49,6 +49,17 @@ VERIFIED_CLAIM_TYPES = (
     "near it does not name a different pair LANA also computed while leaving "
     "out one of the two columns the figure actually came from. Naming half a "
     "pair is treated as too vague to be a mislabelling, not as an error.",
+    "A number is not accepted as verified purely because it lands within "
+    "tolerance of some fact elsewhere in the context. Where the sentence "
+    "explicitly names a different column from the one the matched statistic "
+    "belongs to, and never names that statistic's own column, the match is "
+    "reported as a collision rather than a verification.",
+    "An average or median presented for a column it could not have come "
+    "from is refused outright: min <= mean <= max holds for every column, so "
+    "a central value outside its own column's observed range is impossible "
+    "rather than merely unlikely. The same applies to any central value "
+    "claimed for an identifier column, for which LANA computes no mean, "
+    "median or standard deviation at all.",
 )
 
 KNOWN_BLIND_SPOTS = (
@@ -69,9 +80,13 @@ KNOWN_BLIND_SPOTS = (
     "common for correlation coefficients, which cluster — naming that sibling "
     "is accepted rather than flagged, because it is a defensible reading of "
     "the same number.",
-    "A wrong-but-plausible value that happens to fall inside a column's "
-    "observed range. It is marked 'derived' rather than flagged, because a "
-    "legitimate calculation can land anywhere in that range too.",
+    "A wrong-but-plausible value that falls inside the range of the column it "
+    "is attributed to. It is marked 'derived' rather than flagged, because a "
+    "legitimate calculation can land anywhere in that range too. Only a "
+    "central value *outside* that column's range is refused, and only when "
+    "the sentence attributes it unambiguously — a mention with another number "
+    "between it and this one is treated as too ambiguous to conclude "
+    "anything from.",
     "A non-numeric claim — a causal statement, a comparison, a "
     "recommendation — with no number in it to extract and check at all.",
     "Instructions hidden in the uploaded data itself. Category values are "
@@ -213,24 +228,55 @@ def _matches(value: float, target: float) -> bool:
     return abs(value - target) <= max(_ABS_TOLERANCE, abs(target) * _REL_TOLERANCE)
 
 
-def _mentions(window: str, token: str | None) -> bool:
-    """Whole-word, case-insensitive check for a literal token in a text window.
+def _name_variants(token: str) -> set[str]:
+    """A column name as prose might write it: ``marketing_spend`` or "marketing spend".
 
-    Also matches the way prose writes a column name: a model asked about
-    ``marketing_spend`` answers about "marketing spend". Only separator
-    variants are accepted — this is not fuzzy matching, and a different word
-    is still a different word.
+    Only separator variants. This is not fuzzy matching — a different word is
+    still a different word.
     """
-    if not token:
-        return False
     variants = {token}
     if "_" in token:
         variants.add(token.replace("_", " "))
         variants.add(token.replace("_", "-"))
+    return variants
+
+
+def _mentions(window: str, token: str | None) -> bool:
+    """Whole-word, case-insensitive check for a literal token in a text window."""
+    if not token:
+        return False
     return any(
         re.search(rf"\b{re.escape(v)}\b", window, re.IGNORECASE)
-        for v in variants
+        for v in _name_variants(token)
     )
+
+
+def _nearest_named(answer: str, start: int, end: int, names: set[str]) -> str | None:
+    """Which of ``names`` this number is actually presented as a statistic of.
+
+    Nearest mention wins, and a mention only counts when no *other* number sits
+    between it and this one. Without that second rule, "average revenue is $600
+    per order; the average order is 2.3 items" attributes 2.3 to revenue purely
+    because the word appears in the window — and 2.3 then looks impossible for
+    a column it was never about. Being wrong in that direction costs more than
+    a missed flag, so the attribution has to be unambiguous before anything is
+    concluded from it.
+    """
+    best: tuple[int, str] | None = None
+    for name in sorted(names):
+        for variant in _name_variants(name):
+            for m in re.finditer(rf"\b{re.escape(variant)}\b", answer, re.IGNORECASE):
+                if m.end() <= start:
+                    gap = answer[m.end():start]
+                elif m.start() >= end:
+                    gap = answer[end:m.start()]
+                else:
+                    continue
+                if len(gap) > _ATTRIBUTION_WINDOW_BEFORE or _NUMBER_PATTERN.search(gap):
+                    continue
+                if best is None or len(gap) < best[0]:
+                    best = (len(gap), name)
+    return best[1] if best else None
 
 
 def _attribution_names(fact: Fact) -> tuple[str, ...]:
@@ -328,6 +374,127 @@ def _attribution_check(
     )
 
 
+def _known_columns(context: GroundedContext) -> set[str]:
+    return {f.column for f in context.facts if f.column}
+
+
+def _column_attribution_check(
+    fact: Fact,
+    context: GroundedContext,
+    answer: str,
+    start: int,
+    end: int,
+) -> str | None:
+    """Catch a number matched to a fact about a column the answer never mentions.
+
+    Fact matching is global and label-blind: a number within 2% of *any* of the
+    hundred-odd facts in a context is stamped verified, whatever the sentence
+    around it is actually about. Measured case — "the average order_id is
+    5,249.5" came back verified because it landed within tolerance of "total
+    customer_age for region=west" (5,354). Nothing about that is a
+    verification; it is a collision.
+
+    ``_attribution_check`` above does not see it, because that one compares a
+    fact against its *siblings* — same statistic, different category — and an
+    unrelated column's total is not a sibling of anything the answer named.
+
+    Fires only when the text explicitly names a known column that is not the
+    matched fact's, and does not name the matched fact's own column anywhere in
+    the sentence. Same asymmetry as the sibling check: generous about finding
+    evidence the answer is right, strict about concluding it is wrong.
+    """
+    own = fact.column
+    if not own:
+        return None
+
+    window = answer[max(0, start - _ATTRIBUTION_WINDOW_BEFORE):
+                     min(len(answer), end + _ATTRIBUTION_WINDOW_AFTER)]
+    if _mentions(_sentence_around(answer, start, end) + " " + window, own):
+        return None
+
+    named_other = next(
+        (c for c in sorted(_known_columns(context))
+         if c != own and _mentions(window, c)),
+        None,
+    )
+    if named_other is None:
+        return None
+    return (
+        f"the text is about '{named_other}' here, but this number matches "
+        f"{fact.label} — a statistic of '{own}', which the sentence never mentions"
+    )
+
+
+# Words that mark a number as a claim about a column's centre. A mean or a
+# median is mathematically bound by its own column's min and max, which is what
+# makes the check below arithmetic rather than a heuristic.
+_CENTRAL_TENDENCY_CUES = ("average", "mean", "median", "typical", "midpoint")
+
+# ...and words that mark it as an aggregate instead, which legitimately exceeds
+# any single value's range. A total of a column is not bound by its max, so the
+# check must not fire near one.
+_AGGREGATE_CUES = (
+    "total", "sum", "combined", "altogether", "overall", "count", "number of",
+    "across all", "cumulative", "aggregate",
+)
+
+
+def _impossible_central_value(
+    answer: str,
+    start: int,
+    end: int,
+    context: GroundedContext,
+) -> str | None:
+    """Flag a claimed average/median that its own column cannot produce.
+
+    ``min <= mean <= max`` holds for every column, always — so an answer saying
+    "the average revenue is $45,000" when revenue tops out at $2,000 is not
+    implausible, it is impossible. That makes this one of the few checks here
+    that can conclude "wrong" from arithmetic rather than from a guess.
+
+    Previously such a claim was waved through as "derived", because the
+    plausibility test asked whether the value fell inside *any* column's range.
+    With eight columns spanning different orders of magnitude, almost every
+    number falls inside one of them — which is most of why the validator caught
+    so little.
+    """
+    window = answer[max(0, start - _ATTRIBUTION_WINDOW_BEFORE):
+                     min(len(answer), end + _ATTRIBUTION_WINDOW_AFTER)].lower()
+    if not any(cue in window for cue in _CENTRAL_TENDENCY_CUES):
+        return None
+    if any(cue in window for cue in _AGGREGATE_CUES):
+        return None
+
+    name = _nearest_named(
+        answer, start, end,
+        set(context.centreless_columns) | set(context.column_ranges),
+    )
+    if name is None:
+        return None
+
+    # A column LANA computes no centre for cannot have one quoted back. This
+    # does not depend on the value at all — the average of an identifier is
+    # meaningless whatever number is attached to it, so there is no version of
+    # the claim that could be supported.
+    if name in context.centreless_columns:
+        return (
+            f"presented as a central value of '{name}', which is an identifier — "
+            f"LANA computes no average, median or standard deviation for it, "
+            f"because arithmetic on a key is not meaningful"
+        )
+
+    value = _parse_number(answer[start:end])
+    if value is None or name not in context.column_ranges:
+        return None
+    low, high = context.column_ranges[name]
+    if low <= value <= high:
+        return None
+    return (
+        f"presented as a central value of '{name}', which ranges from {low:,.4g} "
+        f"to {high:,.4g} — an average or median cannot fall outside that"
+    )
+
+
 def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
     """Check an answer's numeric claims and named references against the facts."""
     result = ValidationResult()
@@ -351,12 +518,28 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
         if 1900 <= value <= 2100 and float(value).is_integer():
             continue
 
+        # Checked before the fact scan, not after it. A claim like "the average
+        # order_id is 5,249.5" is refused because no such statistic exists —
+        # and running this first means a chance collision with an unrelated
+        # fact (measured: it matched "total customer_age for region=west")
+        # cannot launder it into a verification.
+        impossible = _impossible_central_value(
+            answer, match.start(), match.end(), context
+        )
+        if impossible is not None:
+            result.claims.append(
+                NumericClaim(raw, value, "unsupported", note=impossible)
+            )
+            continue
+
         matched = next(
             (fact for fact in context.facts if _matches(value, fact.value)), None
         )
         if matched is not None:
             note = _attribution_check(
                 matched, context, answer, match.start(), match.end(), value
+            ) or _column_attribution_check(
+                matched, context, answer, match.start(), match.end()
             )
             status = "misattributed" if note else "verified"
             result.claims.append(
@@ -396,10 +579,17 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
             )
 
     unsupported = [c for c in result.claims if c.status == "unsupported"]
-    if unsupported:
-        preview = ", ".join(c.text for c in unsupported[:4])
+    # A claim carrying a note was refused for a specific, stateable reason —
+    # say that reason rather than folding it into the generic count, which
+    # would throw away the most useful thing the check produced.
+    for claim in [c for c in unsupported if c.note][:4]:
+        result.warnings.append(f"'{claim.text}' cannot be right: {claim.note}.")
+
+    generic = [c for c in unsupported if not c.note]
+    if generic:
+        preview = ", ".join(c.text for c in generic[:4])
         result.warnings.append(
-            f"{len(unsupported)} number(s) in this answer ({preview}) do not match "
+            f"{len(generic)} number(s) in this answer ({preview}) do not match "
             "any statistic LANA computed and fall outside every column's observed "
             "range. Verify them against the data before using them."
         )
