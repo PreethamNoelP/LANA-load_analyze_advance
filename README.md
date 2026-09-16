@@ -16,7 +16,7 @@ LANA is a **local-first AI data analysis platform** — upload any dataset, clea
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4+-F7931E?style=flat-square&logo=scikit-learn&logoColor=white)](https://scikit-learn.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-[**Quick Start**](#️-installation--setup) · [**Architecture**](#️-architecture--system-design) · [**Engineering Log**](docs/engineering-changelog.md) · [**Report a Bug**](https://github.com/PreethamNoelP/LANA-load_analyze_advance/issues)
+[**Quick Start**](#️-installation--setup) · [**Architecture**](#️-architecture--system-design) · [**Changelog**](CHANGELOG.md) · [**Engineering Log**](docs/engineering-changelog.md) · [**Contributing**](CONTRIBUTING.md) · [**Security**](SECURITY.md) · [**Report a Bug**](https://github.com/PreethamNoelP/LANA-load_analyze_advance/issues)
 
 </div>
 
@@ -70,7 +70,7 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 
 | Feature | Description |
 |---|---|
-| 🗂️ **Multi-format Upload** | Streamed, memory-bounded upload of CSV, Excel (`.xlsx`/`.xls`), and JSON. Instant schema detection, plus a bundled sample dataset if you don't have a file handy. |
+| 🗂️ **Multi-format Upload** | Streamed, memory-bounded upload of CSV, Excel (`.xlsx`), and JSON. Instant schema detection, plus a bundled sample dataset if you don't have a file handy. |
 | 🧹 **Explainable Data Cleaning** | Auto-detect duplicates, missing values (two independent outlier rules — IQR and MAD), and text inconsistencies. Every suggested fix carries its statistical reasoning, nothing destructive runs by default, and every change is recorded in a step-by-step transformation log noting exactly which steps were destructive. |
 | 🤖 **Grounded, Validated Answers** | Every question is answered from a structured fact ledger LANA computes from your data, never from raw rows or the model's own recall. Every numeric claim in the answer is then checked against that ledger and flagged as verified, derived, or unsupported — with an in-app panel stating exactly what that check does and doesn't catch. |
 | 📊 **9 Chart Types** | Histogram, Line, Bar, Scatter, Box, Heatmap, Violin, Pie, Area — rendered server-side as crisp PNGs. Large datasets are drawn from a fixed, disclosed sample rather than silently getting slower. |
@@ -451,12 +451,12 @@ Restart the backend — no other changes required.
 | Chart generation latency | ~1–2s (server-side render, sampled above 50k points) |
 | LLM response (phi3:mini, CPU) | ~3–8s |
 | Grounded answer accuracy, measured | 82.5% correct on a 40-question benchmark vs. 52.5% for an ungrounded baseline — same model (phi3:mini), same questions (`eval/`, see `docs/engineering-changelog.md`). One model is an anecdote: run `python -m eval.run --models llama3.1:8b,mistral:7b,phi3:mini` to reproduce it across several and print the comparison table. |
-| Supported input formats | CSV, Excel `.xlsx`/`.xls`, JSON |
+| Supported input formats | CSV, Excel `.xlsx`, JSON (legacy `.xls` is refused with an instruction to re-save — it needs a dependency this project does not carry) |
 | Export formats | CSV (streamed), PDF, DOCX — each carrying the cleaning provenance behind the numbers |
 | Chart types | 9 |
 | Statistical metrics per column | 15+, with 95% confidence intervals |
 | Cleaning operations | Dedup, null fill, dual-rule outlier detection (IQR + MAD), winsorize, text normalization — every step logged, most non-destructive by default. Undo is switching the whole session back to the original version; there is no per-step undo. |
-| Test suite | 239 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
+| Test suite | 240 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
 | Data privacy | 100% — zero external network calls |
 
 ---

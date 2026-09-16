@@ -827,3 +827,54 @@ each. The 10% catch rate quoted above is still the last *measured* figure;
 these changes should raise it, and that claim stays unmade until a real run
 says so. Publishing an improved number inferred from the adversarial suite
 would be exactly the kind of unearned claim this round exists to prevent.
+
+---
+
+## 2026-09-17 — A way in for other people, and two things that were quietly untrue
+
+**Problem.** The repo had no stated way to contribute, no release history a
+user could read, and two small claims that did not hold: an upload format
+advertised but never supported, and CI warning on every run.
+
+**`.xls` removed rather than fixed.** The extension allowlist accepted it and
+the parser could never read it — the legacy binary format needs `xlrd`, which
+is not a dependency, so those uploads died with "Missing optional dependency".
+Two ways out: add the dependency, or stop claiming the format.
+
+Adding it looked like the friendlier option and was rejected on testability.
+Modern pandas cannot *write* `.xls` (xlwt has been gone since pandas 2.0), so
+there is no way to generate a fixture, which means shipping a code path that
+claims to work and is never exercised — in a project whose whole argument is
+that claims should be measured. Dropping it is testable in one line, removes a
+legacy binary parser from the attack surface, and costs a user five seconds in
+Excel. The refusal names the fix ("save it as .xlsx") rather than the missing
+dependency, which is not the user's problem.
+
+**CI actions bumped to v7.** All five jobs were warning that
+`actions/checkout@v4` and friends target the deprecated Node 20 runtime.
+Checked the current majors rather than guessing: checkout, setup-python and
+setup-node are all on v7. The `node-version: 20` used to *build the frontend*
+is unrelated and left alone — that is the project's own toolchain, and moving
+it is a separate decision with its own blast radius.
+
+**A way in.** `CONTRIBUTING.md`, issue forms, and a PR template. Written
+against what this codebase actually pushes back on rather than generic
+boilerplate: comments record why and what it cost, constants in comments are
+measured, tests assert values rather than status codes, and a validator change
+needs a precision control — an adversarial case it should catch *and* a nearby
+one it must leave alone. The bug form asks for the shape of the data rather
+than the data, since the people most likely to hit a bug here are working with
+something they cannot attach.
+
+**`CHANGELOG.md` and v0.1.0.** The engineering log is thorough and is not for
+users — it is problem/attempt/tradeoff prose aimed at whoever maintains this.
+The user-facing changelog is separate and short, and links here for depth.
+v0.1.0 marks the point where the thing is packaged, documented and measured
+well enough to hand to someone else, which is a different milestone from
+"it works".
+
+**Not done here.** The good-first-issue tickets themselves: `gh` is not
+installed on this machine, so they are drafted and waiting to be posted rather
+than created. Still no published multi-model eval numbers — that remains the
+one outstanding piece of the previous round, and it needs a machine with
+Ollama and the models pulled.
