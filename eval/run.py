@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.llm.ollama_provider import OllamaProvider  # noqa: E402
 from eval.adversarial import build_cases as build_adversarial_cases  # noqa: E402
 from eval.cases import CASES  # noqa: E402
+from eval.compare import load_runs, render_markdown  # noqa: E402
 from eval.datasets import employee_survey, retail_orders  # noqa: E402
 from eval.harness import run_adversarial, run_case  # noqa: E402
 
@@ -50,7 +51,25 @@ TIMEOUT = 90.0
 NUM_CTX = 8192
 
 
-def main(limit: int | None, model: str) -> None:
+def main(limit: int | None, models: list[str]) -> None:
+    """Run the suite against each model in turn, then print the comparison.
+
+    Sequentially, not concurrently: a local runtime serves one model at a time,
+    and overlapping them would measure contention rather than the models.
+    """
+    paths = [run_one(limit, model) for model in models]
+    if len(paths) > 1:
+        table = render_markdown(load_runs([str(p) for p in paths]))
+        comparison = RESULTS_DIR / f"comparison_{int(time.time())}.md"
+        comparison.write_text(table + "\n", encoding="utf-8")
+        print("\n" + "=" * 72)
+        print("MODEL COMPARISON")
+        print("=" * 72)
+        print(table)
+        print(f"\nComparison table: {comparison}")
+
+
+def run_one(limit: int | None, model: str) -> Path:
     provider = OllamaProvider(model=model, host=HOST, temperature=TEMPERATURE,
                                max_tokens=MAX_TOKENS, timeout=TIMEOUT, num_ctx=NUM_CTX)
     if not provider.is_available():
@@ -105,6 +124,7 @@ def main(limit: int | None, model: str) -> None:
     }, indent=2, default=str))
     print(f"\nPer-case log:      {log_path}")
     print(f"Full results+summary: {out_path}")
+    return out_path
 
 
 def summarize(main_results, adv_results) -> dict:
@@ -149,6 +169,14 @@ def summarize(main_results, adv_results) -> dict:
         "recall": round(recall, 3) if recall is not None else None,
         "f1": round(f1, 3) if f1 is not None else None,
     }
+
+    # Not a model result: the eval's independent answer key and LANA's own
+    # statistics disagreeing about a case is a finding about one of the two,
+    # and it would otherwise be invisible inside a perfectly ordinary-looking
+    # "correct" rate.
+    summary["ground_truth_disagreements"] = sorted({
+        r.ground_truth_disagreement for r in main_results if r.ground_truth_disagreement
+    })
 
     out_of_scope = [a for a in adv_results if a["capability"] != "numeric_fabrication"]
     by_cap = defaultdict(lambda: {"n": 0, "caught": 0})
@@ -197,10 +225,20 @@ def print_summary(summary: dict) -> None:
     for cap, stats in summary["adversarial_out_of_scope_blind_spots"].items():
         print(f"  {cap:12s}  caught {stats['caught']}/{stats['n']}  (rate={stats['caught_rate']})")
 
+    disagreements = summary.get("ground_truth_disagreements", [])
+    if disagreements:
+        print("\n[!] the independent answer key and LANA's own statistics disagree:")
+        for detail in disagreements:
+            print(f"  {detail}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N cases (smoke test).")
-    parser.add_argument("--model", default=MODEL, help=f"Ollama model tag (default: {MODEL}).")
+    parser.add_argument(
+        "--models", default=MODEL,
+        help=("Comma-separated Ollama model tags, run in turn and compared "
+              f"(default: {MODEL}). Each must already be pulled."),
+    )
     args = parser.parse_args()
-    main(limit=args.limit, model=args.model)
+    main(limit=args.limit, models=[m.strip() for m in args.models.split(",") if m.strip()])
