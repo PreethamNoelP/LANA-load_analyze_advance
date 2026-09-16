@@ -50,6 +50,10 @@ class CaseResult:
     latency_s: float
     validator_flagged: bool | None = None    # only meaningful for condition == "lana"
     validator_warnings: list[str] = field(default_factory=list)
+    # Set when the independent answer key and LANA's own statistics disagree
+    # about this case. Not a model result at all — a finding about the product
+    # or the harness, which would otherwise be invisible inside a "correct".
+    ground_truth_disagreement: str | None = None
 
 
 def _naive_prompt(question: str, context_text: str) -> str:
@@ -93,7 +97,8 @@ def run_case(case: dict, df: pd.DataFrame, provider: OllamaProvider, condition: 
         except Exception as exc:  # noqa: BLE001 — a failed call is itself a result, not a crash
             return CaseResult(case["id"], case["dataset"], case["category"], condition,
                                question, f"[error: {exc}]", "error", gt.note,
-                               time.perf_counter() - start)
+                               time.perf_counter() - start,
+                               ground_truth_disagreement=gt.disagreement)
         validation = validate_answer(answer, context)
         verdict = grade(gt, answer)
         return CaseResult(
@@ -101,6 +106,7 @@ def run_case(case: dict, df: pd.DataFrame, provider: OllamaProvider, condition: 
             verdict, gt.note, time.perf_counter() - start,
             validator_flagged=not validation.trustworthy,
             validator_warnings=list(validation.warnings),
+            ground_truth_disagreement=gt.disagreement,
         )
 
     # condition == "baseline"
@@ -110,10 +116,12 @@ def run_case(case: dict, df: pd.DataFrame, provider: OllamaProvider, condition: 
     except Exception as exc:  # noqa: BLE001
         return CaseResult(case["id"], case["dataset"], case["category"], condition,
                            question, f"[error: {exc}]", "error", gt.note,
-                           time.perf_counter() - start)
+                           time.perf_counter() - start,
+                           ground_truth_disagreement=gt.disagreement)
     verdict = grade(gt, answer)
     return CaseResult(case["id"], case["dataset"], case["category"], condition, question,
-                       answer, verdict, gt.note, time.perf_counter() - start)
+                       answer, verdict, gt.note, time.perf_counter() - start,
+                       ground_truth_disagreement=gt.disagreement)
 
 
 def run_adversarial(cases: list[AdversarialCase], dfs: dict[str, pd.DataFrame]) -> list[dict]:
