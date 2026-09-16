@@ -1,0 +1,56 @@
+name: Bug report
+description: Something behaves differently from what it says it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security vulnerabilities here — see
+        [SECURITY.md](../blob/main/SECURITY.md) for how to report those privately.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        Uploaded a 40 MB CSV, clicked Clean, and the outlier counts came back
+        as zero for every column. I expected the same counts the preview showed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: |
+        The shape of the data matters more than the data itself. Please do not
+        attach a real dataset — describe it (rows, columns, dtypes), or attach
+        a small synthetic file that still shows the problem.
+      placeholder: |
+        1. Upload a CSV with ~100k rows, one float column with ~30% nulls
+        2. Go to Clean
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        How you are running it, your OS, and Python/Node versions. If the AI tab
+        is involved, the model too. `GET /health` reports the limits LANA derived
+        for your machine and is often the fastest answer here.
+      placeholder: |
+        docker compose, Windows 11, phi3:mini via Ollama on the host
+        /health: total_mb 16277, upload_limit_mb 678
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Errors, if any
+      description: Backend traceback or browser console output. Redact anything identifying.
+      render: text

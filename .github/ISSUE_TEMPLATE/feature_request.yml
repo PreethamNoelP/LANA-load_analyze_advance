@@ -1,0 +1,35 @@
+name: Feature or change request
+description: Suggest something LANA should do, or do differently.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: |
+        The problem, not the solution. "I can't tell which rows were imputed
+        before I export" leads somewhere better than "add a column to the
+        export".
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Optional. If you already have a shape in mind, describe it.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Does this fit what LANA is for
+      description: |
+        LANA is a local-first, single-user tool for analysing a dataset you
+        already have. Multi-user features, hosted deployment and pipeline
+        scheduling are deliberately out of scope for now — see the README.
+      options:
+        - Yes, it fits the local single-user tool
+        - Not sure
+        - It goes beyond that, and I think it is worth it anyway
+    validations:
+      required: true
