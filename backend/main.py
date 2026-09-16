@@ -236,8 +236,20 @@ def health():
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
     ext = Path(file.filename).suffix.lower()
-    if ext not in (".csv", ".xlsx", ".xls", ".json"):
-        raise HTTPException(400, f"Unsupported type '{ext}'. Use CSV, Excel, or JSON.")
+    # `.xls` is deliberately absent. It was accepted here for a long time and
+    # could never actually be parsed: the legacy binary format needs `xlrd`,
+    # which is not a dependency, so those uploads died at the parser with
+    # "Missing optional dependency" — an advertised format that never worked.
+    # Refusing it here with a fix the user can act on beats promising it.
+    if ext == ".xls":
+        raise HTTPException(
+            400,
+            "The legacy '.xls' format is not supported. Open it in Excel or "
+            "LibreOffice and save it as '.xlsx' (or export it as CSV), then "
+            "upload that.",
+        )
+    if ext not in (".csv", ".xlsx", ".json"):
+        raise HTTPException(400, f"Unsupported type '{ext}'. Use CSV, Excel (.xlsx), or JSON.")
 
     # The body streams into a spooled temp file rather than accumulating in a
     # list and then being joined. The old path held the payload three times

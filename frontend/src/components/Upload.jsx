@@ -120,7 +120,7 @@ export default function Upload({ onUpload }) {
         <input
           ref={inputRef}
           type="file"
-          accept=".csv,.xlsx,.xls,.json"
+          accept=".csv,.xlsx,.json"
           style={{ display: 'none' }}
           onChange={e => handleFile(e.target.files[0])}
         />

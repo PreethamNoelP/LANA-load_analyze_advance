@@ -132,6 +132,19 @@ def test_a_json_upload_over_budget_is_refused_before_parsing(client, monkeypatch
     assert r.status_code == 413
 
 
+def test_legacy_xls_is_refused_with_a_fix_the_user_can_act_on(client):
+    # It was accepted for a long time and could never be parsed: the legacy
+    # binary format needs xlrd, which is not a dependency, so these uploads
+    # died at the parser with "Missing optional dependency" — a format the
+    # README advertised and the app never supported.
+    r = client.post("/upload", files={"file": ("old.xls", b"\xd0\xcf\x11\xe0junk", "application/vnd.ms-excel")})
+
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert ".xlsx" in detail, "the refusal must say what to do instead"
+    assert "xlrd" not in detail.lower(), "a dependency name is not a user-facing fix"
+
+
 def test_ordinary_uploads_of_every_format_still_pass_the_gate(client):
     df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
 

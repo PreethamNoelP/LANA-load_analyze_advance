@@ -75,7 +75,6 @@ PROJECTION_SAMPLE_ROWS = 5_000
 # OOM-killed halfway through materialising one is not.
 XLSX_FRAME_PER_UNCOMPRESSED = 0.5      # vs 0.24 measured
 JSON_FRAME_PER_SOURCE = 1.0            # vs 0.75 measured
-LEGACY_EXCEL_FRAME_PER_SOURCE = 2.0    # .xls is not a zip; measured 1.99 for .xlsx
 
 
 @dataclass(frozen=True)
@@ -270,7 +269,7 @@ def project_frame_bytes(
             basis=f"projected from the first {PROJECTION_SAMPLE_ROWS:,} rows",
         )
 
-    if ext in (".xlsx", ".xls"):
+    if ext == ".xlsx":
         declared = declared_uncompressed_bytes(spool)
         if declared is not None:
             return FrameProjection(
@@ -281,11 +280,9 @@ def project_frame_bytes(
                     f"data this workbook declares"
                 ),
             )
-        return FrameProjection(
-            frame_bytes=int(source_bytes * LEGACY_EXCEL_FRAME_PER_SOURCE),
-            rows=None,
-            basis="estimated from the file size",
-        )
+        # Not a readable zip, so not a valid .xlsx either — the parse will
+        # fail on it shortly. Estimated from the file size anyway rather than
+        # skipped, so a corrupt upload still meets a budget check first.
 
     return FrameProjection(
         frame_bytes=int(source_bytes * JSON_FRAME_PER_SOURCE),
@@ -438,6 +435,11 @@ def read_frame(
     the three that supports it — Excel and JSON parsers must see the whole
     document to produce anything, so for those the spool's job is simply to
     keep the raw bytes off the heap.
+
+    ``.xls`` is not handled: the legacy binary format needs ``xlrd``, which
+    this project does not depend on, so it is refused at the upload endpoint
+    with an instruction to re-save as ``.xlsx`` rather than accepted here and
+    failed on later.
     """
     spool.seek(0)
     changes: dict[str, str] = {}
@@ -453,7 +455,7 @@ def read_frame(
     else:
         if ext == ".csv":
             df = pd.read_csv(spool)
-        elif ext in (".xlsx", ".xls"):
+        elif ext == ".xlsx":
             df = pd.read_excel(spool)
         else:
             df = pd.read_json(spool)
