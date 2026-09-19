@@ -56,19 +56,33 @@ services:
       start_period: 10s
       retries: 3
     ports:
-      - "8000:8000"  # direct API access — optional, useful for curl/health checks
+      # Bound to the loopback interface, not 0.0.0.0. `- "8000:8000"` — the
+      # Compose default and what this used to say — publishes the port on
+      # every interface the host has, so `docker compose up` on a laptop put
+      # an unauthenticated upload-and-analyse API on the office wifi. That
+      # directly contradicted SECURITY.md ("It binds to localhost") and it is
+      # not a theoretical exposure: LANA_AUTH_TOKEN is empty by default, so
+      # anyone who could route to the machine had full access.
+      #
+      # To reach LANA from another machine, set LANA_AUTH_TOKEN, put it behind
+      # a TLS-terminating proxy, and change this to `${LANA_BIND:-127.0.0.1}:8000:8000`
+      # with LANA_BIND=0.0.0.0 — deliberately, in one place, having read
+      # SECURITY.md.
+      - "127.0.0.1:8000:8000"  # direct API access — useful for curl/health checks
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      args:
-        # Baked into the JS bundle at build time — rebuild this image after
-        # changing LANA_AUTH_TOKEN for the new value to take effect.
-        VITE_LANA_AUTH_TOKEN: ${LANA_AUTH_TOKEN:-}
+      # No build args. The frontend image carries no secret and does not need
+      # rebuilding when LANA_AUTH_TOKEN changes: the browser exchanges the
+      # token for an HttpOnly cookie at runtime against the backend.
     restart: unless-stopped
     ports:
-      - "8080:80"
+      # Loopback for the same reason as the backend above: the default stack
+      # must not be reachable from the network, because the default stack has
+      # no authentication.
+      - "127.0.0.1:8080:80"
     depends_on:
       backend:
         condition: service_healthy
@@ -82,7 +96,10 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     ports:
-      - "11434:11434"
+      # Ollama has no authentication of its own. Publishing it on every
+      # interface hands anyone on the network a free inference endpoint and,
+      # with some models, the ability to pull arbitrary ones onto this host.
+      - "127.0.0.1:11434:11434"
 
 volumes:
   lana_data:
