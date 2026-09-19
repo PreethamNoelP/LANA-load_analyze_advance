@@ -101,6 +101,20 @@ drift from what the code does.
 **Verifies:**
 - A number in the answer matches a fact LANA computed, within a small
   rounding tolerance (2% relative).
+- Where the sentence names both a statistic and a column — 'the average
+  revenue is X' — the number is compared against that column's own mean
+  specifically, not against every fact in the context. A wrong value for
+  a correctly-named statistic is therefore caught even when it happens
+  to collide with an unrelated figure, and even when it falls inside the
+  column's range. This applies to mean, median, standard deviation,
+  minimum, maximum, sum, count and share, including the group-scoped
+  form ('the average revenue in the north region').
+- Where the answer was produced by running a SQL query against the
+  actual rows, every figure is checked against that query's result, and
+  the claim records that its provenance is an executed query rather than
+  a precomputed summary.
+- A figure stated as a count of rows or records that exceeds the
+  dataset's own row count is refused as arithmetically impossible.
 - A quoted or backticked column or category name that does not exist in
   this dataset is caught as an unknown reference.
 - For a number that belongs to one specific column or category — a
@@ -120,11 +134,11 @@ drift from what the code does.
   belongs to, and never names that statistic's own column, the match is
   reported as a collision rather than a verification.
 - An average or median presented for a column it could not have come
-  from is refused outright: min <= mean <= max holds for every column, so
-  a central value outside its own column's observed range is impossible
-  rather than merely unlikely. The same applies to any central value
-  claimed for an identifier column, for which LANA computes no mean,
-  median or standard deviation at all.
+  from is refused outright: min <= mean <= max holds for every column,
+  so a central value outside its own column's observed range is
+  impossible rather than merely unlikely. The same applies to any
+  central value claimed for an identifier column, for which LANA
+  computes no mean, median or standard deviation at all.
 
 **Does not verify:**
 - A real, correctly-computed number attached to the wrong label, where
@@ -144,13 +158,16 @@ drift from what the code does.
   common for correlation coefficients, which cluster — naming that
   sibling is accepted rather than flagged, because it is a defensible
   reading of the same number.
-- A wrong-but-plausible value that falls inside the range of the column
-  it is attributed to. It is marked 'derived' rather than flagged,
-  because a legitimate calculation can land anywhere in that range too.
-  Only a central value *outside* that column's range is refused, and
-  only when the sentence attributes it unambiguously — a mention with
-  another number between it and this one is treated as too ambiguous to
-  conclude anything from.
+- A wrong-but-plausible value that falls inside its column's range *and*
+  is not tied to a named statistic. Where the sentence names the
+  statistic as well as the column, the targeted check above compares
+  against that exact figure and catches the error; where it names only
+  the column, or phrases the quantity loosely ('revenue is around 400'),
+  the number is marked 'derived' rather than flagged, because a
+  legitimate calculation can land anywhere in that range too.
+  Attribution must also be unambiguous — a mention with another number
+  between it and this one is treated as too vague to conclude anything
+  from.
 - A non-numeric claim — a causal statement, a comparison, a
   recommendation — with no number in it to extract and check at all.
 - Instructions hidden in the uploaded data itself. Category values are

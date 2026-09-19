@@ -8,6 +8,504 @@ not just to record what shipped.
 
 ---
 
+## 2026-09-20 — Grounding isolation, the SSRF guard that wasn't, deployment posture, auditability
+
+A second audit round. Every finding below is a case where the code and the
+documentation disagreed, and in each one the documentation was the optimistic
+party. That pattern is the thing worth recording: this codebase's comments are
+unusually good, and *that is exactly what made these hard to see* — a
+well-argued paragraph describing a defence reads like evidence the defence
+exists.
+
+---
+
+### 1. Executed-SQL facts leaked across questions — the worst bug found
+
+**Problem.** `build_context()` is expensive (profiling plus a correlation scan,
+~2.1 s on a 200k x 30 frame) so its result is cached per session version. The
+executed-SQL path needs its query's figures in the fact list for the validator
+to credit them, and did it like this:
+
+```python
+context = _build_query_context(session)   # the cached object
+context.facts.extend(sql_answer.facts)    # mutated in place
+```
+
+The comment directly above it said *"Executed facts are appended to a copy of
+the ledger's fact list"*. There was no copy. So question 1's query results
+stayed in the shared context forever, and question 5 was validated against
+question 1's evidence as well as its own.
+
+**Why this is the worst one.** `validate_answer` marks a number verified when
+it matches any fact in the context within 2% relative tolerance. With stale
+facts accumulating, a figure the current answer had no basis for could collide
+with a leftover from an earlier question and be shown to the user with the
+green *"verified against the data"* mark. A warning that never fires costs a
+user nothing. A verification badge on a fabricated number costs them the
+reason they trusted the tool — which is the specific failure the entire
+validation layer exists to prevent. Two lesser consequences came with it:
+unbounded per-session growth, and two concurrent questions mutating one list.
+
+**Solution.** `_with_sql_facts()` in `backend/main.py` returns
+`dataclasses.replace(context, facts=[*context.facts, *sql_answer.facts])` — a
+new `GroundedContext` with a fresh list, sharing text, ranges, vocabulary and
+coverage by reference because the validator only reads those. One small list
+per question instead of a rebuild.
+
+**Evidence.** `tests/test_grounding_isolation.py`. The tests were verified to
+fail against the original code before being accepted: reinstating the in-place
+extend fails three of them, including the end-to-end one that asks two
+questions and inspects the session's cached context afterwards.
+
+---
+
+### 2. The SSRF guard documented four layers and implemented three
+
+**Problem.** `app/sources/security.py` opens with a careful account of four
+guards, ending: *"4. The connection is pinned to the address that was
+validated, which closes the DNS-rebinding window between the check and the
+connect. Guard 4 is the one people skip."* SECURITY.md repeated the claim.
+
+`CheckedUrl.ip` was computed and never read. `check_redirect_chain` was dead
+code. `RestSource._get` called `check_url(current)` and then handed
+`checked.url` — the *hostname* — to `httpx`, which performed its own DNS
+lookup at connect time. Two resolutions: one checked, one used. A hostname
+with a one-second TTL answers the first with a public address and the second
+with `127.0.0.1`, and every other guard is bypassed.
+
+**Solution.** `CheckedUrl` now carries every validated address and can render
+a pinned URL; `RestSource._open` builds the request against an IP literal with
+`Host` naming the original site and the `sni_hostname` extension set so TLS
+still verifies the certificate against that name. All validated addresses are
+tried in turn — they were all checked, and a host whose first record is
+unreachable from this network (an AAAA on an IPv4-only host) must still work.
+
+**The tempting wrong fix, stated because it is the obvious one.** Pinning
+breaks HTTPS unless SNI is handled, and the quick way to make a pinned HTTPS
+request "work" is to disable certificate verification. That trades a
+rebinding window for a permanent man-in-the-middle. `sni_hostname` is what
+makes pinning and verification coexist, and a test asserts it is set rather
+than asserting the fetch merely succeeded.
+
+**Evidence.** `tests/test_ssrf_pinning.py` asserts the destination is an IP
+literal (so no second lookup can influence it), that `Host` and SNI still name
+the site, that a 302 to `169.254.169.254` is refused before a socket opens,
+and that a second address is tried when the first is unreachable.
+
+---
+
+### 3. `docker compose up` published an unauthenticated API on the network
+
+**Problem.** SECURITY.md's first bullet: *"It binds to localhost."* The Compose
+file said `- "8000:8000"` and `- "8080:80"`, which publish on every interface,
+and `LANA_AUTH_TOKEN` defaults to empty. So the documented posture and the
+shipped default were opposites, and the gap was invisible to anyone who read
+either one alone.
+
+**Solution.** `127.0.0.1:` prefixes on all three published ports, including
+the opt-in Ollama service — which has no authentication of its own and, once
+exposed, is a free inference endpoint for anyone who can route to the host.
+Reaching LANA from elsewhere is now a deliberate edit with the reasoning
+written next to it.
+
+**Also added:** one `security posture` log line per worker at startup, naming
+auth mode, persistence, SQL grounding, whether private source URLs are
+permitted, and how many file roots are configured. An operator who inherits a
+running LANA cannot otherwise tell whether the person who deployed it turned
+the SSRF guard off. A specific warning fires for the one combination that is a
+live exposure rather than a choice: no token, with CORS opened to a non-local
+origin.
+
+---
+
+### 4. The `file` connector was an arbitrary server-side read
+
+**Problem.** Not documented anywhere, and the only finding here that was a gap
+rather than a contradiction. `FileSource` reads a caller-supplied path on the
+server's disk. On a laptop that is the feature. With `LANA_AUTH_TOKEN` set —
+the shared deployment the project explicitly supports — `POST /sources/load`
+with `{"kind": "file", "target": "/srv/other/export.csv"}` returns that file as
+a dataset. The extension allowlist is no defence: CSV and JSON are exactly what
+interesting files are in.
+
+**Solution.** The policy is keyed on the project's own existing signal for
+"more than one person can reach this" rather than a second switch that could
+disagree with the first. No token: unrestricted, unchanged.
+`LANA_FILE_SOURCE_ROOTS` set: confined to those directories.
+Token set with no roots: the connector reports itself *unavailable* with the
+variable named, so the UI greys it out with a reason.
+
+Refusing to guess is the point. Silently exposing the filesystem and silently
+removing a feature someone was using are both worse than saying which
+configuration is missing.
+
+Containment is decided on `Path.resolve()`d paths — a string comparison is
+defeated by `..` or a symlink — and re-checked on every access rather than
+once at construction, because a symlink can be repointed in between.
+
+---
+
+### 5. The product's strongest feature was invisible in the product
+
+**Problem.** The 0.2.0 changelog told users: *"The query and its result travel
+with the answer, so you can read exactly where a number came from — and re-run
+it yourself."* That was true of the API. `/query/stream` emits a `sql` event
+carrying the statement, the columns, the rows and the timing. `App.jsx`
+handled `delta` and `validation` and silently ignored `sql` and `grounding`,
+so nothing reached the screen.
+
+This is the gap that matters most for the product rather than for security.
+The entire argument for LANA over a general chatbot is that its figures are
+computed rather than recalled, and the evidence for that was being discarded
+one layer from the user.
+
+**Solution.** A `Provenance` component in `AskAI.jsx`: a badge on every answer
+(*Computed by query* / *From computed summary*) and, for executed answers, a
+collapsed panel holding the exact statement and the result table. Collapsed
+because the badge is the everyday signal and the table is for the moment
+someone wants to check the work.
+
+The backend now also emits `{"grounding": "sql"}` on the SQL branch. It only
+emitted it on the ledger branch before, so a client had to infer the SQL path
+from the *absence* of an event.
+
+**One thing the verification found that tests would not have.** Driven in a
+browser against real data, `avg_revenue` rendered as `267.5210191082802`.
+The table exists so a reader can compare it against the answer's stated
+"267.52" — printing sixteen significant figures beside that makes the
+comparison harder than not showing the table at all. Values are now formatted,
+with small magnitudes (a correlation, a p-value) kept at six decimals so they
+do not collapse to `0.00`.
+
+---
+
+### 6. Auditability
+
+**Problem.** The structured log answers *"why was yesterday slow"*. Nothing
+answered *"who exported that dataset, and when"* — logs go to stdout and live
+as long as the container.
+
+**Solution.** `app/audit.py`: append-only JSONL under the data directory,
+rotated at 8 MB. A deliberately small closed set of actions — data loaded,
+cleaned, version-switched, questioned, exported, plus refused access and
+failed authentication — so the file can be read end to end by a person rather
+than grepped by an engineer.
+
+**What it does not record, and why that is the harder decision.** No cell
+values, no column names, no secrets, no token. An audit trail that copies the
+data it audits is a second, less protected copy of that data, which is how
+audit logging becomes the breach. Cleaning records operation *types* and row
+counts; which columns were filled and with what stays in the lineage ledger,
+which already travels with the data. Every detail string goes through the
+connector redaction on the way in, because the thing most likely to arrive
+here by accident is a connection label built from a URI with a password in it.
+
+`GET /audit` is scoped to the calling principal, always — reading the trail
+must not become a way to observe someone else's activity. It reports
+`enabled` explicitly, because "nothing happened" and "nothing is being
+recorded" are very different answers.
+
+**A bug the tests found.** A process killed mid-write leaves a line with no
+terminator, and appending straight onto it fused the fragment and the next
+entry into one unparseable line — so a crash cost *two* records, the second
+of which nobody would know was missing. `record()` now closes a torn line
+before appending.
+
+**Stated limit.** This is a file under a process lock, not a tamper-evident
+ledger. It answers what this instance did for an operator reading it; it is
+not evidence against someone with write access to the disk.
+
+---
+
+### What is still missing after this round
+
+- **No real user accounts.** Sessions are owned, but with `LANA_AUTH_TOKEN`
+  everyone shares one principal, so two colleagues on one instance still see
+  each other's sessions. This is the largest remaining gap for enterprise use
+  and it needs actual authentication, not another refinement of the token.
+- **Charts are server-rendered PNGs.** No zoom, no hover, no brushing, and a
+  chart cannot be exported as data.
+- **Exports carry the profile and the lineage but not the conversation.** The
+  questions asked and the queries that answered them — now visible in the UI —
+  do not reach the PDF or the Word report.
+- **Persisted sessions are unencrypted at rest**, as stated in SECURITY.md.
+- **Multi-host replicas remain unsupported.** Coordination is filesystem-based
+  by deliberate choice.
+
+---
+
+## 2026-09-17 — Executed-SQL grounding, validator recall, connectors, production hardening
+
+A single round addressing an external audit. Its findings are quoted where they
+drove a change, because several were right in ways that were uncomfortable to
+read.
+
+---
+
+### 1. The fact ledger's coverage ceiling — removed by executing queries
+
+**Problem.** The audit: *"LANA's ledger approach has a hard ceiling: it can only
+answer what `build_context()` happened to precompute, capped at
+`MAX_CORRELATIONS = 8`, `MAX_REGRESSIONS = 2`, `MAX_DETAIL_COLUMNS = 30`."*
+That is what the 2026-08-19 entry below had already measured from the other
+direction: three of seven residual failures were "scope gaps, not
+hallucinations". No prompt fixes a fact that was never computed.
+
+**Solution.** `app/analysis/sql_engine.py` and `app/llm/sql_answer.py`. A
+question is planned as one DuckDB `SELECT`, executed against the session's
+frame, and answered from the *result table*. The number is computed from the
+rows rather than retrieved from a summary — a strictly stronger form of
+grounding than retrieval.
+
+The ledger was **not** replaced. It still builds the context, still answers when
+planning fails, and still supplies the column ranges and vocabulary the
+validator judges surrounding prose against. `SqlPlanningFailed` is a
+first-class outcome: the path is better when it works and must never be worse
+than what it replaced when it does not.
+
+**The security problem this creates, and the four layers in front of it.** A
+model writing SQL the server executes is a code-execution path reached from a
+text box, and DuckDB reads files, speaks HTTP via `httpfs`, and can `ATTACH`
+databases. Layers: DuckDB with `enable_external_access=false` and
+`lock_configuration=true`; a single-statement check using DuckDB's own parser;
+a read-only shape check; a denylist of file-touching functions. Layer 1 is what
+actually holds — verified directly: `read_csv_auto`, `COPY … TO`, `ATTACH` and
+`INSTALL` all raise `PermissionException`, and re-enabling external access
+raises `InvalidInputException`.
+
+**A bug the tests found in the denylist.** The first version matched whole
+words, so `\bread_csv\b` matched `read_csv` and **not** `read_csv_auto` — `_`
+is a word character, so there is no boundary after the prefix. A local file
+read passed validation and was stopped only by the sandbox, which is precisely
+the single-layer situation the denylist exists to prevent. Fixing it by
+matching prefixes then over-fired on a column legitimately named
+`glob_region`. The final form matches a *called function* (identifier, optional
+quote, `(`) for readers and a whole word for statement keywords. Both
+directions are pinned by tests.
+
+**Tradeoff, stated because it is real.** The SQL path costs two model calls
+(plan, then answer) against the ledger's one, plus up to one repair attempt.
+For a question the ledger could already answer, that is strictly more latency.
+Accepted because the ledger's answer to a question it *cannot* cover is wrong
+rather than slow, and `LANA_SQL_GROUNDING=false` turns it off.
+
+---
+
+### 2. Validator recall: 0.571 → 0.810, precision held at 1.000
+
+**Problem.** The audit's sharpest finding: *"the validator — the thing LANA
+claims as its differentiator — catches 14.3% of wrong answers"*, and the README
+reported the 82.5% accuracy figure while leaving that number in this changelog.
+Both halves were fair.
+
+**Root cause.** Fact matching was *global*: a number within 2% of any of the
+~100 facts in a context was stamped `verified` regardless of what the sentence
+claimed it was. With eight columns spanning different magnitudes, almost
+everything matches something.
+
+**Solution.** `_targeted_statistic_check` resolves the claim the way a reader
+does — "the average revenue is X" means `mean(revenue)` — and compares against
+*that fact alone*. When it resolves, its verdict is authoritative and the global
+scan is skipped, because a targeted comparison cannot be laundered by a
+collision. Facts gained `statistic` and `provenance`, so a figure can also be
+credited to an executed query rather than a precomputed summary.
+
+**Two bugs this surfaced, both found by tests rather than inspection.**
+
+1. *A correct answer flagged.* `"The average revenue is $221.88 per order; the
+   average order is 2.3 items"` resolved `$221.88` against `mean revenue for
+   rating=3` and reported the true mean as wrong. Cause: the category `"3"` is
+   matched by `\b3\b`, which matches the `3` inside `2.3`. A bare-number
+   category now requires its grouping column to be named too. This was
+   `eval/adversarial.py`'s adv-20, which exists specifically as a precision
+   control — it earned its place.
+2. *Cue selection read left-to-right.* `"There are 500 orders … of which 31.4%
+   came from the north region"` resolved `31.4` against the *count* cue opening
+   the sentence and flagged a correct share. Cues are now ranked by distance
+   from the number, and a trailing `%` settles it outright.
+
+**Result.** Measured by `eval/validator_bench.py`, which loads any earlier git
+revision of `validation.py` and scores it on the same cases, so the delta is
+recomputed rather than asserted:
+
+| | recall | precision | f1 |
+|---|---|---|---|
+| before | 0.571 | 1.000 | 0.727 |
+| after | **0.810** | **1.000** | **0.895** |
+
+The adversarial suite grew from 20 to 36 cases to measure this honestly — a
++0.077 delta on the old 20-case suite was one case, which is not evidence of
+anything. Every new wrong case is paired with a correct one in identical
+phrasing, because a check that gains recall by flagging both is not an
+improvement, and only the pairing makes that visible.
+
+**What is still missed, and why it is counted as a miss.** Four of 36: two
+causal claims with no number to check, and two *paraphrases* — "the oldest
+customer" for `max(customer_age)`, "been at the company for" for
+`years_at_company`. The targeted check matches names literally. Those two keep
+`should_flag=True` rather than being reclassified out of the metric, so the
+published recall reflects the gap instead of defining it away.
+
+---
+
+### 3. A benchmark that only ever saw clean data
+
+**Problem.** The audit: *"No real-world messy dataset. Not evidenced in the
+project."* Correct. Both seeded frames had correct dtypes, tidy labels and
+missingness placed on purpose — a fair test of statistical correctness and an
+unfair test of everything else.
+
+**Solution.** `messy_support_tickets()`: numbers stored as text with currency
+symbols and thousands separators, four date formats in one column, category
+labels differing only by case and whitespace, five spellings of "missing" that
+pandas does not read as NaN, exact and near-duplicate rows, an extreme outlier,
+a constant column and an empty one. Ten cases run against it, resolved against
+an explicit cleaned reference.
+
+Scored **separately, never pooled**. Averaging clean and messy produces one
+number describing neither, and the gap between them is the honest headline.
+`--seeds 0,1,2` regenerates every dataset so a figure becomes a spread rather
+than one convenient draw.
+
+---
+
+### 4. Concurrency, measured — and two real bugs it found
+
+**Problem.** The audit: *"the memory-budget reasoning is impressive but
+untested under contention"*. Also correct.
+
+**Solution.** `eval/load_test.py`: p50/p95/p99 per endpoint under N concurrent
+clients, RSS growth, and whether an over-budget upload is refused cleanly rather
+than by dying. It prints its mode in every report, because in-process ASGI
+numbers exclude the network and reporting them as end-to-end would be the kind
+of overclaim this project documents against.
+
+**First run, 16 concurrent clients, 196 requests: zero 5xx.** Admission control
+returned 413 with an actionable message and kept serving. Two findings:
+
+1. **`/health` p95 of 7.9s, p99 8.0s** — by far the slowest endpoint. Every call
+   probed the LLM, and with Ollama stopped each probe paid a full connection
+   timeout. A liveness endpoint that takes eight seconds *precisely when a
+   dependency is down* is a healthcheck that fails the container for the wrong
+   reason. Now cached for 5s behind a non-blocking lock.
+2. **RSS reported 0.0 MB on Windows.** `GetCurrentProcess()` returns the
+   pseudo-handle `-1`; passed as a bare Python int, ctypes marshalled it as 32
+   bits and the call failed silently. A benchmark reporting zero memory is worse
+   than one reporting nothing.
+
+**Remaining, unfixed and stated:** `/chart` p95 is 7.2s under 16 clients.
+Server-side matplotlib serialises, and it is the slowest thing LANA does.
+
+---
+
+### 5. Multi-worker: from an undocumented constraint to a supported one
+
+**Problem.** The audit: *"`uvicorn --workers 2` silently breaks session affinity
+**and** the concurrency cap. Nothing in the code or Dockerfile prevents this."*
+The `threading.Semaphore` gave four workers four independent caps of two; the
+in-memory dict gave them four disjoint session stores.
+
+**Solution.** `backend/coordination.py` behind one interface —
+`InProcessCoordinator` (unchanged single-user behaviour) and `SqliteCoordinator`
+(leases and token buckets in the SQLite file persistence already uses, with
+`BEGIN IMMEDIATE` around each read-modify-write). Plus read-through in
+`SessionStore.get`: a worker that misses reads the frames another worker
+persisted instead of returning 404.
+
+Not Redis — adding a mandatory network service to make a concurrency cap correct
+would be a cost paid by every single-user install for a deployment shape that is
+not the common one.
+
+**The boundary, stated rather than implied away:** this coordinates workers
+*sharing a filesystem*. It is not a distributed lock service, and replicas
+across separate hosts are not supported.
+
+---
+
+### 6. Auth that was never access control
+
+**Problem.** `VITE_LANA_AUTH_TOKEN` was compiled into the JavaScript bundle. The
+audit: *"anyone who can load the page has the token. It gates `curl`, not
+browsers."*
+
+**Solution.** `POST /auth/session` trades the token for an HttpOnly,
+SameSite=Strict cookie. Page scripts cannot read it, an XSS payload cannot
+exfiltrate it, and rotating it no longer means rebuilding the frontend image —
+which the Dockerfile and compose file no longer accept a build arg for. Bearer
+headers still work for API clients.
+
+Sessions also gained an owner. A different principal gets **404, not 403** — 403
+confirms the id exists and turns the endpoint into an enumeration oracle.
+Ownership is read from a request-scoped `ContextVar` rather than a parameter
+threaded through eighteen endpoints, because the endpoint someone forgets to
+thread it through is the hole.
+
+**A bug the tests found.** `/auth/status` was not exempt from the auth
+middleware, so a browser could not ask whether a token was required without
+already having one.
+
+---
+
+### 7. Observability, and the metric that double-counted
+
+**Problem.** Five `logger.warning` calls in the whole codebase. No metrics, no
+request ids. The audit: *"no way to answer why was yesterday slow"*.
+
+**Solution.** `app/observability.py` — JSON logs with a request id on every
+record via `ContextVar` (so it survives `run_in_threadpool`), and a Prometheus
+registry. Stdlib only: a JSON formatter is forty lines and a counter is a dict
+with a lock, matching the reasoning `app/resources.py` already applies to RAM
+probing. Path labels are collapsed to `/session/{id}` so instrumentation cannot
+mint one time series per upload.
+
+**A bug the tests found.** `Histogram.observe` incremented every bucket the
+value fell into, and `_render_series` accumulated cumulatively as well — so one
+0.5s sample appeared three times in `le="10"`, and `le="+Inf"` disagreed with
+the largest finite bucket. Storage is now non-cumulative; only rendering
+cumulates.
+
+---
+
+### 8. Connectors: one contract, four sources
+
+**Problem.** One way in — file upload — wired directly into `/upload`.
+
+**Solution.** `app/sources/`: a `DataSource` ABC, a registry, and file, SQL
+(SQLAlchemy), MongoDB and REST/URL connectors. A connector's only job is to
+produce a `DataFrame` and describe itself; everything downstream is unchanged
+and unaware. `GET /sources` is generated from the registry and the frontend
+picker renders from it, so a new connector appears in the UI with no frontend
+change. `tests/test_sources.py` drives every registered connector through one
+conformance suite, and `test_a_connector_dataset_gets_the_full_pipeline`
+asserts a SQL-backed session reaches profiling, cleaning, charts, statistics,
+regression, lineage and export — so "same capabilities regardless of source" is
+a fact about the code rather than a claim in a README.
+
+**SSRF is the serious part.** "Analyse the data at this URL" hands an attacker
+an HTTP client inside the deployment network; `169.254.169.254` returns cloud
+credentials. Defence: scheme allowlist, *every* resolved address must be public
+(checking one is not enough — a name with a public A record and a `127.0.0.1` A
+record passes a first-match check), every redirect hop re-validated, and the
+connection pinned to the checked address to close the DNS-rebinding window.
+
+**Credentials** are supplied out-of-band from the connection string, never
+echoed back, and redacted from every human-facing string.
+
+---
+
+### What this round did not fix
+
+* `/chart` p95 of 7.2s under concurrency — matplotlib serialises.
+* Paraphrased statistic and column references remain unvalidated (2 of 36).
+* Prompt injection via a *column name*: the planner sees the schema, so a
+  maliciously named column is still text it reads. The sandbox bounds the
+  consequences; it does not remove the influence.
+* The 82.5% accuracy figure is still one model, one seed, clean data. The
+  infrastructure to widen it now exists and is documented; the runs need a
+  machine with the models pulled, and are not in this round.
+
+---
+
 ## 2026-08-19 — Build the evaluation harness
 
 **Problem.** LANA's claim to reduce LLM hallucination on numeric questions

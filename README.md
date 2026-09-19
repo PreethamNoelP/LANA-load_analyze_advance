@@ -70,15 +70,20 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 
 | Feature | Description |
 |---|---|
+| 🔌 **Any Source, Same Pipeline** | Files (CSV, Excel `.xlsx`, JSON), **SQL databases** (PostgreSQL, MySQL, SQLite — anything SQLAlchemy drives), **MongoDB** collections, and **REST/URL** endpoints. Every connector normalises into one `DataFrame` contract, so profiling, cleaning, questions, charts, statistics, validation and export are identical whatever the source. Test a connection, preview the schema and eight real rows, then load. Adding another source is one subclass and one `register()` call — a conformance suite enforces that it needs no changes anywhere else. |
 | 🗂️ **Multi-format Upload** | Streamed, memory-bounded upload of CSV, Excel (`.xlsx`), and JSON. Instant schema detection, plus a bundled sample dataset if you don't have a file handy. |
 | 🧹 **Explainable Data Cleaning** | Auto-detect duplicates, missing values (two independent outlier rules — IQR and MAD), and text inconsistencies. Every suggested fix carries its statistical reasoning, nothing destructive runs by default, and every change is recorded in a step-by-step transformation log noting exactly which steps were destructive. |
-| 🤖 **Grounded, Validated Answers** | Every question is answered from a structured fact ledger LANA computes from your data, never from raw rows or the model's own recall. Every numeric claim in the answer is then checked against that ledger and flagged as verified, derived, or unsupported — with an in-app panel stating exactly what that check does and doesn't catch. |
+| 🤖 **Answers Computed, Then Checked** | A question is first answered by **generating SQL and running it against your rows** in a sandboxed DuckDB — so the figure is computed from the data, not retrieved from a summary someone decided to precompute. The executed statement and its result table are shown with the answer, behind a one-click disclosure, so you can read exactly where every figure came from and re-run the query yourself. When a question cannot be expressed as a query, LANA falls back to the structured fact ledger it builds from your data. Either way every numeric claim is checked afterwards, and the check now resolves *which statistic of which column* a sentence claims rather than scanning for any number that happens to match. |
+| 🛡️ **A Trust Signal That Was Measured** | Claims land as verified, derived, unsupported or misattributed, each carrying whether it was verified against an executed query or a precomputed fact. **0.810 recall at 1.000 precision** on a 36-case adversarial suite, up from 0.571 — recomputed on every push by `eval/validator_bench.py`, not quoted from memory. The blind spots it still has are published in the code, at `GET /validator/capabilities`, in the docs and in a UI panel, and a test fails if any of them silently starts or stops working. |
 | 📊 **9 Chart Types** | Histogram, Line, Bar, Scatter, Box, Heatmap, Violin, Pie, Area — rendered server-side as crisp PNGs. Large datasets are drawn from a fixed, disclosed sample rather than silently getting slower. |
 | 📐 **Rigorous Statistics** | 15+ metrics per column (mean, median, std, IQR, skew, kurtosis…) with 95% confidence intervals; correlation scans corrected for multiple testing (Benjamini-Hochberg FDR) so "significant" isn't just a raw p-value. |
 | 📉 **Linear Regression** | OLS with R², coefficient CI95, and diagnostics — heteroscedasticity, residual normality, high-leverage points — plus a plain-English interpretation. |
 | 📄 **One-click Export** | Download as CSV (streamed, bounded memory even on very large exports), or generate a PDF/DOCX report that includes the cleaning provenance and quality caveats behind the numbers, not just the numbers. |
 | ⚙️ **Adapts to Your Machine** | Upload and session-memory limits are derived from the host's actual RAM at startup, not a flat constant — the same build works on an 8 GB laptop and a 64 GB workstation. Check what it chose at `GET /health`. |
-| 🔒 **100% Local & Private** | No cloud API. No telemetry. No data leaves your machine. |
+| 🔒 **100% Local & Private** | No cloud API. No telemetry. No data leaves your machine — and a URL source refuses private, loopback and cloud-metadata addresses so "fetch this URL" cannot be turned into a request forgery against your own network. |
+| 📈 **Production Observability** | Structured JSON logs with a request id on every record, and Prometheus metrics at `GET /metrics` covering request rate, latency histograms, LLM path and outcome, SQL query outcomes, validation verdicts by provenance, and resident sessions. Counts and latencies only — never a column name, a value or a filename. |
+| 🧾 **Auditable** | Data loaded, cleaned, version-switched, questioned and exported — plus refused access and failed sign-ins — are appended to a durable `audit.jsonl` carrying the principal, request id and session. Never cell values, column names or the token: an audit trail that copies the data it audits is a second, less protected copy of that data. Read your own at `GET /audit`. |
+| 🧵 **Safe Under Concurrency** | Per-caller rate limiting, per-session ownership, and an LLM concurrency cap that is enforced *across* uvicorn workers rather than once per worker. Measured: 16 concurrent clients, 196 requests, zero 5xx (`python -m eval.load_test`). |
 | 🎨 **Production UI** | Dark-theme React SPA with a ChatGPT-style chat interface, sessions that survive a page refresh, and confirmation before anything destructive. |
 | 🔌 **Pluggable LLM Backend** | Swap between Ollama and any OpenAI-compatible endpoint (Groq, LM Studio, Together.ai) via `.env`. |
 | 🐳 **Docker-ready** | `docker compose up --build` and open a browser — no local Python/Node setup required. |
@@ -102,6 +107,13 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 │                     FastAPI  (Uvicorn ASGI)                            │
 │                                                                       │
 │  GET  /health          →  host RAM/CPU + derived limits + LLM status  │
+│  GET  /metrics         →  Prometheus: rates, latencies, verdicts       │
+│  POST /auth/session    →  trade the shared token for an HttpOnly cookie│
+│                                                                       │
+│  GET  /sources         →  connectors available in this build           │
+│  POST /sources/test    →  reach the source, list its tables            │
+│  POST /sources/preview →  schema + 8 real rows, before committing      │
+│  POST /sources/load    →  fetch → admission check → Session (as upload)│
 │                                                                       │
 │  POST /upload          →  ingest.spool_upload() (streamed, no 3x copy)│
 │                        →  admission check against host-derived budget │
@@ -116,12 +128,16 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 │  POST /clean/version   →  switch active view (original/cleaned)       │
 │  GET  /clean/status    →  which version is active, and how it got there│
 │                                                                       │
-│  POST /query(/stream)  →  Session.context() → build_context()         │
-│                        →  facts + bounded prompt (LIMITS disclosed)   │
-│                        →  LLMProvider.answer_question()               │
+│  POST /query(/stream)  →  1. plan SQL from the schema (never the rows)│
+│                        →  2. execute_sql() in a sandboxed DuckDB      │
+│                        →  3. answer from the RESULT TABLE only        │
+│                           ...or fall back to the fact ledger:         │
+│                           Session.context() → build_context()         │
 │                        →  validate_answer() → verified/derived/       │
-│                           unsupported, per numeric claim              │
+│                           unsupported/misattributed, per claim, with  │
+│                           provenance (executed query vs. ledger)      │
 │  GET  /validator/capabilities → what that check does and doesn't catch│
+│  GET  /audit           →  your own load/clean/query/export history     │
 │                                                                       │
 │  POST /chart           →  create_chart(df, type, col) → PNG bytes     │
 │                           (sampled + disclosed above the plot limit)  │
@@ -133,6 +149,20 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 └──────────┬───────────────────────────┬───────────────────────────────┘
            │                           │
            ↓                           ↓
+┌─────────────────┐        ┌──────────────────────────┐
+│  app/sources/   │        │  app/analysis/            │
+│                 │        │                           │
+│  FileSource     │        │  sql_engine (DuckDB,      │
+│  SqlSource      │──rows─▶│    sandboxed, read-only)  │
+│  MongoSource    │        │  statistics · regression  │
+│  RestSource     │        │                           │
+│  (DataSource    │        │                           │
+│   ABC + registry)│       │                           │
+└─────────────────┘        └──────────────────────────┘
+        │
+        ▼  every connector yields one pd.DataFrame, and from
+           here nothing downstream knows where it came from
+
 ┌─────────────────┐        ┌──────────────────────────┐
 │   app/llm/      │        │  app/analysis/            │
 │                 │        │  app/data/                │
@@ -391,6 +421,17 @@ Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 > and request-size limits are there to keep a mistake from taking the
 > machine down; they are not a substitute for access control either way.
 >
+> Setting the token also changes one default on purpose: the `file` connector,
+> which reads a path on the *server's* disk, switches itself off until
+> `LANA_FILE_SOURCE_ROOTS` names the directories it may read. On your own
+> laptop reading your own disk is the feature; on an instance someone else can
+> reach, it is a way to read any CSV or JSON on the host. Uploading a file is
+> unaffected.
+>
+> `docker compose up` publishes on `127.0.0.1` only, for the same reason.
+> Reaching it from another machine means setting the token, putting it behind
+> a TLS proxy, and changing the port binding deliberately.
+>
 > [`SECURITY.md`](SECURITY.md) states the full threat model: what LANA does
 > protect against, what it knowingly does not, and how to report a problem.
 
@@ -450,13 +491,16 @@ Restart the backend — no other changes required.
 | Time to first AI insight | < 30s from upload (or instant, via the bundled sample dataset) |
 | Chart generation latency | ~1–2s (server-side render, sampled above 50k points) |
 | LLM response (phi3:mini, CPU) | ~3–8s |
-| Grounded answer accuracy, measured | 82.5% correct on a 40-question benchmark vs. 52.5% for an ungrounded baseline — same model (phi3:mini), same questions (`eval/`, see `docs/engineering-changelog.md`). One model is an anecdote: run `python -m eval.run --models llama3.1:8b,mistral:7b,phi3:mini` to reproduce it across several and print the comparison table. |
+| Grounded answer accuracy, measured | 82.5% correct on a 40-question benchmark vs. 52.5% for an ungrounded baseline — same model (phi3:mini), same questions, **clean synthetic data, one model, one seed**. That is a narrow result and is labelled as one. Reproduce it across models and seeds with `python -m eval.run --models llama3.1:8b,mistral:7b --seeds 0,1,2`; ten further cases now run against a deliberately messy dataset and are scored separately, never pooled into this figure. |
+| Validator recall, measured | **0.810 recall at 1.000 precision** on a 36-case adversarial suite (`python -m eval.validator_bench`), up from 0.571 before the targeted-statistic check. Stated right next to the accuracy number on purpose: catching wrong answers is the differentiating claim, and an earlier version of this README reported accuracy while leaving the catch rate in a changelog. The four remaining misses are documented blind spots, not unknowns. |
 | Supported input formats | CSV, Excel `.xlsx`, JSON (legacy `.xls` is refused with an instruction to re-save — it needs a dependency this project does not carry) |
 | Export formats | CSV (streamed), PDF, DOCX — each carrying the cleaning provenance behind the numbers |
 | Chart types | 9 |
 | Statistical metrics per column | 15+, with 95% confidence intervals |
 | Cleaning operations | Dedup, null fill, dual-rule outlier detection (IQR + MAD), winsorize, text normalization — every step logged, most non-destructive by default. Undo is switching the whole session back to the original version; there is no per-step undo. |
-| Test suite | 240 backend tests (`pytest tests/ -q`) + 6 frontend tests (`npm test`), with lint and coverage, run on every push against Python 3.11 and 3.13 |
+| Test suite | 419 backend tests (`pytest tests/ -q`) + 21 frontend tests (`npm test`), with lint, coverage, a validator precision/recall benchmark and a concurrency smoke test, run on every push against Python 3.11 and 3.13 |
+| Concurrency, measured | 16 concurrent clients, 196 requests, **zero 5xx**; p95 per endpoint from 236 ms (`/profile`) to 7.2 s (`/chart`, server-side matplotlib); RSS 264 MB → 407 MB across 16 resident sessions. Reproduce with `python -m eval.load_test`. In-process figures — they exclude network and the uvicorn worker pool, and the report says so. |
+| Data sources | File upload (CSV/XLSX/JSON), SQL databases (PostgreSQL, MySQL, SQLite, anything SQLAlchemy drives), MongoDB collections, and REST/URL endpoints — all reaching the identical pipeline |
 | Data privacy | 100% — zero external network calls |
 
 ---
