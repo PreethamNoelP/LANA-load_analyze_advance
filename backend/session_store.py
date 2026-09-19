@@ -51,6 +51,13 @@ class Session:
     raw: pd.DataFrame
     last_used: float = field(default_factory=time.monotonic)
 
+    # Who may use this session. Empty means unowned, which is what every
+    # session created before ownership existed looks like and what a
+    # single-user local install produces when no auth is configured — in both
+    # cases the check below is a no-op, so this is additive rather than a
+    # behaviour change for the common case.
+    owner: str = ""
+
     cleaned: pd.DataFrame | None = None
     ledger: CleaningLedger | None = None
     active_version: str = ORIGINAL
@@ -229,7 +236,8 @@ class SessionStore:
         """
         loaded = sorted(self._persist.load_all(), key=lambda r: r["last_used"])
         for rec in loaded:
-            session = Session(session_id=rec["session_id"], filename=rec["filename"], raw=rec["raw"])
+            session = Session(session_id=rec["session_id"], filename=rec["filename"],
+                              raw=rec["raw"], owner=rec.get("owner", ""))
             if rec["cleaned"] is not None:
                 session.set_cleaned(rec["cleaned"], rec["ledger"] or CleaningLedger())
             try:
@@ -242,8 +250,10 @@ class SessionStore:
 
     # ── Writing ──────────────────────────────────────────────────────────────
 
-    def create(self, session_id: str, filename: str, df: pd.DataFrame) -> Session:
-        session = Session(session_id=session_id, filename=filename, raw=df)
+    def create(self, session_id: str, filename: str, df: pd.DataFrame,
+               owner: str = "") -> Session:
+        session = Session(session_id=session_id, filename=filename, raw=df,
+                          owner=owner)
         with self._lock:
             self._sessions[session_id] = session
             self._sessions.move_to_end(session_id)
@@ -259,15 +269,58 @@ class SessionStore:
     # ── Reading ──────────────────────────────────────────────────────────────
 
     def get(self, session_id: str) -> Session | None:
-        """Fetch a session, marking it recently used and expiring stale ones."""
+        """Fetch a session, marking it recently used and expiring stale ones.
+
+        On a miss, and only when persistence is enabled, the session is read
+        back from disk before giving up. That is what lets a second uvicorn
+        worker serve a session the first one created: the frames are on the
+        shared volume, so a cache miss is a read rather than a 404. Without
+        it, ``--workers 2`` breaks every request after the upload.
+        """
         with self._lock:
             self._expire_locked()
             session = self._sessions.get(session_id)
-            if session is None:
-                return None
-            session.last_used = time.monotonic()
+            if session is not None:
+                session.last_used = time.monotonic()
+                self._sessions.move_to_end(session_id)
+                return session
+
+        if self._persist is None:
+            return None
+
+        # Loaded outside the lock: reading Parquet takes real time on a large
+        # frame, and holding the store's mutex through it would stall every
+        # other session's requests behind one cache miss.
+        record = self._persist.load_one(session_id)
+        if record is None:
+            return None
+
+        restored = Session(
+            session_id=record["session_id"], filename=record["filename"],
+            raw=record["raw"], owner=record.get("owner", ""),
+        )
+        if record["cleaned"] is not None:
+            restored.set_cleaned(record["cleaned"], record["ledger"] or CleaningLedger())
+        try:
+            restored.set_version(record["active_version"])
+        except ValueError:
+            pass
+
+        with self._lock:
+            # Another thread may have loaded the same session while this one
+            # was reading. Keeping the existing object matters: two Session
+            # instances for one id means two caches and two locks, and a
+            # version switch applied to the copy nobody else holds.
+            existing = self._sessions.get(session_id)
+            if existing is not None:
+                existing.last_used = time.monotonic()
+                self._sessions.move_to_end(session_id)
+                return existing
+            restored.last_used = time.monotonic()
+            self._sessions[session_id] = restored
             self._sessions.move_to_end(session_id)
-            return session
+            self._evict_locked()
+            return restored
 
     def stats(self) -> dict[str, Any]:
         with self._lock:

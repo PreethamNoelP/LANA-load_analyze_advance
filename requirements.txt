@@ -16,6 +16,15 @@ pyarrow==24.0.0          # Parquet read/write for optional session persistence
 # ── Machine learning ──────────────────────────────────────────────────────────
 scikit-learn==1.9.0
 
+# ── Executed-SQL grounding ────────────────────────────────────────────────────
+# Answers a question by running SQL over the session's frame rather than
+# retrieving a precomputed fact, which is what removes the fact ledger's
+# coverage ceiling. Sandboxed — see app/analysis/sql_engine.py for the four
+# layers and tests/test_sql_engine.py for the evidence they hold.
+# LANA runs without it (set LANA_SQL_GROUNDING=false, or simply omit it) and
+# falls back to ledger-only grounding.
+duckdb==1.5.5
+
 # ── Visualisation ─────────────────────────────────────────────────────────────
 matplotlib==3.11.0
 seaborn==0.13.2
@@ -32,12 +41,25 @@ ollama==0.6.2
 # OpenAI-compatible APIs (Groq, LM Studio, Together.ai, Fireworks, etc.)
 openai==2.44.0
 
+# ── Data source connectors (app/sources/) ─────────────────────────────────────
+# Each is optional: a missing driver makes exactly one connector report itself
+# unavailable in GET /sources, with an install hint, rather than breaking the
+# app. File upload — the default path — needs none of them.
+sqlalchemy==2.0.51       # SQL databases. The engine's own driver is separate:
+                          #   PostgreSQL -> pip install psycopg
+                          #   MySQL      -> pip install pymysql
+                          #   SQLite     -> built in
+pymongo==4.18.1          # MongoDB collections
+httpx==0.28.1            # REST / URL sources (also used by the OpenAI SDK)
+
 # ── Config ────────────────────────────────────────────────────────────────────
 python-dotenv==1.2.2
 
 # ── Optional: PDF loading ─────────────────────────────────────────────────────
 # pdfplumber>=0.10.0      # Uncomment to enable PDF ingestion
 
-# ── Optional: RAG / Vector store ─────────────────────────────────────────────
-# chromadb>=0.5.0
-# sentence-transformers>=3.0.0
+# Deliberately absent: a vector store. Retrieval over embeddings is the wrong
+# primitive for tabular aggregates — the numbers come from executing SQL and
+# from computed statistics, both of which are exact. Commented-out dependencies
+# for a design this project does not use were removed rather than left as
+# aspirational clutter.

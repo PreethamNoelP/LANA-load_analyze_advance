@@ -37,6 +37,20 @@ from .context import Fact, GroundedContext
 VERIFIED_CLAIM_TYPES = (
     "A number in the answer matches a fact LANA computed, within a small "
     "rounding tolerance (2% relative).",
+    "Where the sentence names both a statistic and a column — 'the average "
+    "revenue is X' — the number is compared against that column's own mean "
+    "specifically, not against every fact in the context. A wrong value for a "
+    "correctly-named statistic is therefore caught even when it happens to "
+    "collide with an unrelated figure, and even when it falls inside the "
+    "column's range. This applies to mean, median, standard deviation, "
+    "minimum, maximum, sum, count and share, including the group-scoped form "
+    "('the average revenue in the north region').",
+    "Where the answer was produced by running a SQL query against the actual "
+    "rows, every figure is checked against that query's result, and the claim "
+    "records that its provenance is an executed query rather than a "
+    "precomputed summary.",
+    "A figure stated as a count of rows or records that exceeds the "
+    "dataset's own row count is refused as arithmetically impossible.",
     "A quoted or backticked column or category name that does not exist in "
     "this dataset is caught as an unknown reference.",
     "For a number that belongs to one specific column or category — a column "
@@ -80,13 +94,15 @@ KNOWN_BLIND_SPOTS = (
     "common for correlation coefficients, which cluster — naming that sibling "
     "is accepted rather than flagged, because it is a defensible reading of "
     "the same number.",
-    "A wrong-but-plausible value that falls inside the range of the column it "
-    "is attributed to. It is marked 'derived' rather than flagged, because a "
-    "legitimate calculation can land anywhere in that range too. Only a "
-    "central value *outside* that column's range is refused, and only when "
-    "the sentence attributes it unambiguously — a mention with another number "
-    "between it and this one is treated as too ambiguous to conclude "
-    "anything from.",
+    "A wrong-but-plausible value that falls inside its column's range *and* "
+    "is not tied to a named statistic. Where the sentence names the statistic "
+    "as well as the column, the targeted check above compares against that "
+    "exact figure and catches the error; where it names only the column, or "
+    "phrases the quantity loosely ('revenue is around 400'), the number is "
+    "marked 'derived' rather than flagged, because a legitimate calculation "
+    "can land anywhere in that range too. Attribution must also be "
+    "unambiguous — a mention with another number between it and this one is "
+    "treated as too vague to conclude anything from.",
     "A non-numeric claim — a causal statement, a comparison, a "
     "recommendation — with no number in it to extract and check at all.",
     "Instructions hidden in the uploaded data itself. Category values are "
@@ -166,6 +182,17 @@ class NumericClaim:
     status: str                       # verified | derived | unsupported | misattributed
     matched_fact: str | None = None
     note: str | None = None           # why, for a misattributed claim
+    # How the matched fact was obtained: "ledger" (LANA precomputed it while
+    # building the context) or "executed_sql" (it is a cell of a result
+    # returned by a query run against the real rows). These are not equally
+    # strong claims and the UI must not render them as though they were.
+    provenance: str | None = None
+    # True when the verdict came from resolving *which* statistic of *which*
+    # column the sentence was talking about and comparing against that fact
+    # specifically, rather than from scanning every fact for a value within
+    # tolerance. A targeted verdict is the one worth trusting; see
+    # _targeted_statistic_check.
+    targeted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         out = {"text": self.text, "value": self.value, "status": self.status}
@@ -173,6 +200,10 @@ class NumericClaim:
             out["matched_fact"] = self.matched_fact
         if self.note:
             out["note"] = self.note
+        if self.provenance:
+            out["provenance"] = self.provenance
+        if self.targeted:
+            out["targeted"] = True
         return out
 
 
@@ -197,6 +228,19 @@ class ValidationResult:
         return sum(1 for c in self.claims if c.status == "misattributed")
 
     @property
+    def executed_count(self) -> int:
+        """Claims verified against a cell of an actually-executed query result."""
+        return sum(
+            1 for c in self.claims
+            if c.status == "verified" and c.provenance == "executed_sql"
+        )
+
+    @property
+    def targeted_count(self) -> int:
+        """Claims whose verdict came from a resolved (statistic, column) lookup."""
+        return sum(1 for c in self.claims if c.targeted)
+
+    @property
     def trustworthy(self) -> bool:
         return not self.warnings
 
@@ -207,6 +251,8 @@ class ValidationResult:
             "verified": self.verified_count,
             "unsupported": self.unsupported_count,
             "misattributed": self.misattributed_count,
+            "executed": self.executed_count,
+            "targeted": self.targeted_count,
             "unknown_references": list(self.unknown_references),
             "warnings": list(self.warnings),
             "claims": [c.to_dict() for c in self.claims],
@@ -378,6 +424,34 @@ def _known_columns(context: GroundedContext) -> set[str]:
     return {f.column for f in context.facts if f.column}
 
 
+def _naming_a_fact(fact: Fact, context: GroundedContext) -> set[str]:
+    """Every name a sentence could correctly use for this fact's measure.
+
+    For a ledger fact that is just the column. For an executed-SQL fact the
+    ``column`` is a query *alias* — ``avg_revenue``, ``total_spend`` — and an
+    answer describing it says "revenue", not "avg_revenue". Treating the alias
+    as the only acceptable name made every correct executed answer look
+    misattributed: the sentence named `revenue`, the fact was called
+    `avg_revenue`, and the column check reported a collision.
+
+    So an alias is also named by any real dataset column it was derived from,
+    detected by the column appearing as a word inside the alias. That is
+    deliberately narrow — ``avg_revenue`` is named by ``revenue``, but not by
+    ``marketing_spend`` — so the check keeps its teeth on genuinely wrong
+    attributions.
+    """
+    names = {fact.column} if fact.column else set()
+    if fact.provenance == "executed_sql" and fact.column:
+        alias_parts = set(re.split(r"[^A-Za-z0-9]+", fact.column.lower()))
+        for candidate in _known_columns(context):
+            if candidate == fact.column:
+                continue
+            candidate_parts = set(re.split(r"[^A-Za-z0-9]+", candidate.lower()))
+            if candidate_parts and candidate_parts <= alias_parts:
+                names.add(candidate)
+    return {n for n in names if n}
+
+
 def _column_attribution_check(
     fact: Fact,
     context: GroundedContext,
@@ -407,14 +481,19 @@ def _column_attribution_check(
     if not own:
         return None
 
+    # Every name that would correctly identify this fact's measure — the
+    # column itself, plus the dataset columns behind a SQL alias.
+    acceptable = _naming_a_fact(fact, context)
+
     window = answer[max(0, start - _ATTRIBUTION_WINDOW_BEFORE):
                      min(len(answer), end + _ATTRIBUTION_WINDOW_AFTER)]
-    if _mentions(_sentence_around(answer, start, end) + " " + window, own):
+    sentence = _sentence_around(answer, start, end) + " " + window
+    if any(_mentions(sentence, name) for name in acceptable):
         return None
 
     named_other = next(
         (c for c in sorted(_known_columns(context))
-         if c != own and _mentions(window, c)),
+         if c not in acceptable and _mentions(window, c)),
         None,
     )
     if named_other is None:
@@ -495,6 +574,248 @@ def _impossible_central_value(
     )
 
 
+# ── Targeted (statistic, column) resolution ─────────────────────────────────
+# The single largest source of missed errors in the measured run was that fact
+# matching is *global*: a number within 2% of any of the ~100 facts in a
+# context was stamped "verified" regardless of what the sentence claimed it
+# was. `_column_attribution_check` catches the subset where the sentence names
+# a different known column, but says nothing when the sentence names the right
+# column and simply states the wrong value for it — the most common real
+# failure, and one the old code reported as a clean verification whenever the
+# wrong value happened to collide with some unrelated fact.
+#
+# This resolves the claim the way a reader does — "the average revenue is X"
+# means mean(revenue) — and compares against *that* fact alone. When it
+# resolves, its verdict is authoritative and the global scan is skipped
+# entirely, because a targeted comparison cannot be laundered by a collision.
+
+_STATISTIC_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Ordered: the first cue found in the window wins, so more specific
+    # multi-word phrases must precede the single words they contain.
+    ("std", ("standard deviation", "std dev", "stdev", "std.")),
+    ("correlation", ("correlation", "correlated", "correlates", "corr.")),
+    ("r2", ("r-squared", "r squared", "r2", "r²")),
+    ("coefficient", ("coefficient", "slope")),
+    ("intercept", ("intercept",)),
+    ("median", ("median",)),
+    ("mean", ("average", "mean", "avg.", "typical")),
+    ("max", ("maximum", "highest", "largest", "greatest", "peak", "max ")),
+    ("min", ("minimum", "lowest", "smallest", "min ")),
+    ("share", ("percentage", "percent", "share of", "proportion", "%")),
+    ("sum", ("total", "sum of", "combined", "altogether")),
+    ("count", ("count of", "number of", "how many", "there are")),
+)
+
+# A statistic named for a *pair* of columns cannot be resolved by finding one
+# column name near the number, so the targeted check stays out of their way
+# and leaves them to the existing pair-attribution logic.
+_PAIRWISE_STATISTICS = frozenset({"correlation", "r2", "coefficient", "intercept"})
+
+
+def _statistic_in_window(window: str, number_at: int) -> str | None:
+    """Which summary the text around a number says it is, if it says at all.
+
+    ``number_at`` is the number's own offset inside ``window``, and cues are
+    ranked by distance from it rather than by position in the string. Reading
+    left-to-right instead got this wrong on a sentence with two claims:
+    "There are 500 orders, of which 31.4% came from the north region" resolved
+    31.4 against the *count* cue ("there are") that opens the sentence, and
+    flagged a correct share as a wrong count (eval/adversarial.py adv-36).
+    The nearest cue is the one the number is actually governed by.
+    """
+    lowered = window.lower()
+    best: tuple[int, str] | None = None
+    for statistic, cues in _STATISTIC_CUES:
+        for cue in cues:
+            start = 0
+            while (position := lowered.find(cue, start)) != -1:
+                # Distance to the nearer edge of the cue, so a long phrase is
+                # not penalised against a short one sitting the same distance
+                # away.
+                distance = min(
+                    abs(position - number_at),
+                    abs(position + len(cue) - number_at),
+                )
+                if best is None or distance < best[0]:
+                    best = (distance, statistic)
+                start = position + 1
+    return best[1] if best else None
+
+
+# A number written with a trailing percent sign is a share, whatever else the
+# sentence says around it. Checked before the cue scan so no amount of nearby
+# prose can reinterpret it as a count or a total.
+_TRAILING_PERCENT_RE = re.compile(r"\s{0,4}(?:%|percent)", re.IGNORECASE)
+
+
+def _facts_by_statistic(
+    context: GroundedContext, statistic: str, column: str
+) -> list[Fact]:
+    return [
+        f for f in context.facts
+        if f.statistic == statistic and f.column and f.column.lower() == column.lower()
+    ]
+
+
+# A category label that is just a number — the levels of a 1-5 rating code, a
+# year, a boolean stored as 0/1 — cannot be located by a word-boundary search,
+# because `\b3\b` matches the "3" inside "2.3". That is not a hypothetical:
+# it made "the average revenue is $221.88 per order; the average order is 2.3
+# items" resolve to `mean revenue for rating=3` and flag a correct answer
+# (eval/adversarial.py adv-20). For these, the grouping column has to be named
+# too — "rating 3", not a stray digit somewhere in the sentence.
+_BARE_NUMBER_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?$")
+
+
+def _mentions_category(window: str, fact: Fact) -> bool:
+    """Whether this window genuinely names the group a fact belongs to."""
+    if not fact.category:
+        return False
+    if _BARE_NUMBER_RE.match(fact.category.strip()):
+        return bool(
+            fact.category_column
+            and _mentions(window, fact.category_column)
+            and _mentions(window, fact.category)
+        )
+    return _mentions(window, fact.category)
+
+
+def _targeted_statistic_check(
+    answer: str,
+    start: int,
+    end: int,
+    value: float,
+    context: GroundedContext,
+) -> NumericClaim | None:
+    """Resolve the claim to one fact and rule on it, or return None.
+
+    Returns None whenever the sentence is not specific enough to resolve —
+    no statistic cue, no unambiguously-nearest column, or no such fact
+    computed. The same asymmetry the rest of this module uses applies: be
+    strict about concluding "wrong", generous about declining to conclude.
+    """
+    window_start = max(0, start - _ATTRIBUTION_WINDOW_BEFORE)
+    window = answer[window_start:min(len(answer), end + _ATTRIBUTION_WINDOW_AFTER)]
+    if _TRAILING_PERCENT_RE.match(answer[end:end + 10]):
+        statistic = "share"
+    else:
+        statistic = _statistic_in_window(window, start - window_start)
+    if statistic is None or statistic in _PAIRWISE_STATISTICS:
+        return None
+
+    known = _known_columns(context)
+    if not known:
+        return None
+    column = _nearest_named(answer, start, end, known)
+    if column is None:
+        return None
+
+    candidates = _facts_by_statistic(context, statistic, column)
+    if not candidates:
+        return None
+
+    # A group-scoped claim ("average revenue in the north region") must be
+    # checked against that group's own figure, not the column-wide one. Where
+    # a category is named in the window, narrow to facts carrying it; where
+    # none is, prefer the column-wide fact (the one with no category column).
+    scoped = [
+        f for f in candidates
+        if f.category and f.category_column and _mentions_category(window, f)
+    ]
+    if scoped:
+        candidates = scoped
+    else:
+        whole_column = [f for f in candidates if not f.category_column]
+        if whole_column:
+            candidates = whole_column
+        elif len(candidates) > 1:
+            # Several group-level facts and no category named: the sentence
+            # does not say which group it means, so nothing can be concluded.
+            return None
+
+    hit = next((f for f in candidates if _matches(value, f.value)), None)
+    if hit is not None:
+        return NumericClaim(
+            answer[start:end], value, "verified",
+            matched_fact=hit.label, provenance=hit.provenance, targeted=True,
+        )
+
+    # Resolved to a specific fact whose value this is not. This is the case
+    # the old global scan reported as verified whenever the wrong number
+    # happened to land within 2% of anything else in the context.
+    expected = candidates[0]
+    note = (
+        f"presented as the {statistic} of '{column}', which LANA computed "
+        f"as {expected.value:,.6g}, not {value:,.6g}"
+    )
+
+    # Where the quoted number is a real figure borrowed from somewhere else,
+    # say so. Knowing the answer reported the *other* side of a split, or
+    # another column's mean, is a more actionable diagnosis than "that is not
+    # the right number", and it is the distinction the misattributed /
+    # unsupported split exists to carry: a mislabelled real value is a
+    # different defect from an invented one.
+    #
+    # "Somewhere else" has to include a sibling category of the same column,
+    # not just a different column. The original organic failure this whole
+    # check descends from is exactly that shape — remote=True's share quoted
+    # under the label remote=False — and restricting the search to other
+    # columns silently reclassified it as a plain fabrication.
+    borrowed = next(
+        (f for f in context.facts
+         if f.statistic == statistic
+         and _matches(value, f.value)
+         and (f.column, f.category) != (expected.column, expected.category)),
+        None,
+    )
+    if borrowed is not None:
+        if borrowed.column and borrowed.column.lower() != column.lower():
+            whose = f"'{borrowed.column}'"
+        elif borrowed.category:
+            whose = f"'{borrowed.category}'"
+        else:
+            whose = "another group"
+        return NumericClaim(
+            answer[start:end], value, "misattributed",
+            matched_fact=borrowed.label,
+            provenance=borrowed.provenance,
+            targeted=True,
+            note=f"{note} — {value:,.6g} is the {statistic} of {whose}",
+        )
+
+    return NumericClaim(
+        answer[start:end], value, "unsupported",
+        matched_fact=expected.label,
+        provenance=expected.provenance,
+        targeted=True,
+        note=note,
+    )
+
+
+def _impossible_count(
+    answer: str, start: int, end: int, value: float, context: GroundedContext
+) -> str | None:
+    """A row/record count larger than the dataset itself cannot be right.
+
+    Arithmetic, not a heuristic: no subset of N rows has more than N members,
+    so a count cued as rows/records/orders above the stated row count is
+    impossible regardless of which column it claims to be about.
+    """
+    window = answer[max(0, start - _ATTRIBUTION_WINDOW_BEFORE):
+                     min(len(answer), end + _ATTRIBUTION_WINDOW_AFTER)].lower()
+    if not any(cue in window for cue in ("number of", "count", "how many", "there are")):
+        return None
+    if any(cue in window for cue in ("average", "mean", "median", "percent", "%", "total of")):
+        return None
+    rows = next((f.value for f in context.facts if f.label == "row count"), None)
+    if rows is None or value <= rows:
+        return None
+    return (
+        f"stated as a count, but it exceeds the dataset's {int(rows):,} total "
+        f"rows — no subset can be larger than the whole"
+    )
+
+
 def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
     """Check an answer's numeric claims and named references against the facts."""
     result = ValidationResult()
@@ -526,13 +847,36 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
         impossible = _impossible_central_value(
             answer, match.start(), match.end(), context
         )
+        if impossible is None:
+            impossible = _impossible_count(
+                answer, match.start(), match.end(), value, context
+            )
         if impossible is not None:
             result.claims.append(
                 NumericClaim(raw, value, "unsupported", note=impossible)
             )
             continue
 
+        # Authoritative when it resolves: a comparison against *the* fact the
+        # sentence names cannot be laundered by an unrelated collision, which
+        # is exactly what the global scan below is vulnerable to. Skipping
+        # that scan on a targeted verdict is the point, not an optimisation.
+        targeted = _targeted_statistic_check(
+            answer, match.start(), match.end(), value, context
+        )
+        if targeted is not None:
+            result.claims.append(targeted)
+            continue
+
+        # Executed-SQL facts are consulted first. A number produced by running
+        # a query against the real rows is a stronger match than one that
+        # merely equals a precomputed summary, so when both would match, the
+        # claim is credited to the stronger evidence.
         matched = next(
+            (f for f in context.facts
+             if f.provenance == "executed_sql" and _matches(value, f.value)),
+            None,
+        ) or next(
             (fact for fact in context.facts if _matches(value, fact.value)), None
         )
         if matched is not None:
@@ -543,7 +887,8 @@ def validate_answer(answer: str, context: GroundedContext) -> ValidationResult:
             )
             status = "misattributed" if note else "verified"
             result.claims.append(
-                NumericClaim(raw, value, status, matched_fact=matched.label, note=note)
+                NumericClaim(raw, value, status, matched_fact=matched.label,
+                             note=note, provenance=matched.provenance)
             )
             continue
 

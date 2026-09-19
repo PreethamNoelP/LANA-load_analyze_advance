@@ -137,6 +137,22 @@ class Fact:
     a reader would have to write to attribute the fact correctly, and the
     validator requires all of them rather than any one. It defaults to
     ``(category,)``, so a single-level fact needs nothing extra.
+
+    ``provenance`` records how the figure was obtained, because those are not
+    equally strong claims and the UI should not present them as though they
+    were. ``"ledger"`` means LANA precomputed it while building this context;
+    ``"executed_sql"`` means it is a cell of a result returned by a query run
+    against the real rows (see ``app/llm/sql_answer.py``). A number matching
+    an executed fact is verified against what the data actually contains, not
+    against a summary of it, and ``app.llm.validation`` reports the two
+    distinctly for that reason.
+
+    ``statistic`` names which summary this fact is, when it is one — "mean",
+    "median", "std", "min", "max", "sum", "count", "null_pct", "share".
+    ``app.llm.validation`` uses it for the targeted check: a sentence saying
+    "the average revenue is X" resolves to the *mean of revenue specifically*
+    rather than being compared against every fact in the context, which is
+    what previously let an unrelated collision be reported as a verification.
     """
 
     label: str
@@ -146,6 +162,8 @@ class Fact:
     category_column: str | None = None
     family: str | None = None
     category_names: tuple[str, ...] = ()
+    provenance: str = "ledger"
+    statistic: str | None = None
 
 
 @dataclass
@@ -434,6 +452,7 @@ def _describe_column(
                 facts.append(Fact(
                     f"{name} {label}", float(value), column=name,
                     category=name, family=f"stat::{label}",
+                    statistic=label,
                 ))
         note = ""
         if identifier:
@@ -457,6 +476,7 @@ def _describe_column(
                 facts.append(Fact(
                     f"count of {name}={value}", float(count), column=name,
                     category=_safe_value(value), category_column=name, family=f"count::{name}",
+                    statistic="count",
                 ))
             levels = ", ".join(f"{_safe_value(v)} ({c:,})" for v, c in p.top_values)
             note = (
@@ -485,6 +505,7 @@ def _describe_column(
         facts.append(Fact(
             f"count of {name}={value}", float(count), column=name,
             category=_safe_value(value), category_column=name, family=f"count::{name}",
+            statistic="count",
         ))
     listed = ", ".join(f"{_safe_value(value)} ({count:,})" for value, count in shown)
     more = f", +{p.unique - len(shown)} rarer" if p.unique > len(shown) else ""
@@ -513,6 +534,7 @@ def _category_breakdowns(
             facts.append(Fact(
                 f"share of {name}={label} in percent", round(pct, 1), column=name,
                 category=label, category_column=name, family=f"share_pct::{name}",
+                statistic="share",
             ))
         lines.append(f"- '{name}': " + "; ".join(parts))
     return lines
@@ -572,10 +594,12 @@ def _group_summaries(
                 facts.append(Fact(
                     f"mean {num} for {cat}={label}", round(mean_val, 6), column=num,
                     category=label, category_column=cat, family=f"mean::{num}_by::{cat}",
+                    statistic="mean",
                 ))
                 facts.append(Fact(
                     f"total {num} for {cat}={label}", round(float(row["sum"]), 6), column=num,
                     category=label, category_column=cat, family=f"total::{num}_by::{cat}",
+                    statistic="sum",
                 ))
             best, worst = grouped.index[0], grouped.index[-1]
             note = " [encoded scale — average is illustrative, not a continuous measurement]" if is_discrete else ""
@@ -627,6 +651,7 @@ def _correlation_summary(
             # Every coefficient in this section is a direct alternative to
             # every other one: same statistic, different pair of columns.
             family="correlation",
+            statistic="correlation",
         ))
 
     if not significant:
@@ -688,5 +713,6 @@ def _regression_lines(
                 category=pair_label,
                 category_names=pair_names,
                 family=f"regression::{stat}",
+                statistic=stat,
             ))
     return lines

@@ -18,13 +18,17 @@ two implementations that nobody has written down.
 import pytest
 
 from eval.cases import CASES
-from eval.datasets import employee_survey, retail_orders
+from eval.datasets import employee_survey, messy_support_tickets, retail_orders
 from eval.ground_truth import resolve
 
 
 @pytest.fixture(scope="module")
 def dfs():
-    return {"retail": retail_orders(), "survey": employee_survey()}
+    return {
+        "retail": retail_orders(),
+        "survey": employee_survey(),
+        "messy": messy_support_tickets(),
+    }
 
 
 @pytest.fixture(scope="module")

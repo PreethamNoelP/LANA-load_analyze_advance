@@ -214,7 +214,19 @@ def _sse_events(response_text):
     return [json.loads(line[len("data: "):]) for line in response_text.strip().split("\n\n") if line]
 
 
-def test_query_stream_endpoint(client, monkeypatch):
+@pytest.fixture
+def ledger_only(monkeypatch):
+    """Force the ledger grounding path.
+
+    Executed-SQL grounding is tried first in production, and these tests are
+    about the ledger path's own contract. Disabling it explicitly is clearer
+    than relying on a fake provider happening to fail SQL planning, and it
+    keeps the tests meaningful when the fake grows a `generate` method.
+    """
+    monkeypatch.setattr(backend_main, "SQL_GROUNDING_ENABLED", False)
+
+
+def test_query_stream_endpoint(client, monkeypatch, ledger_only):
     sid = upload(client)["session_id"]
 
     class _FakeProvider:
@@ -226,10 +238,16 @@ def test_query_stream_endpoint(client, monkeypatch):
     r = client.post("/query/stream", json={"session_id": sid, "question": "hi"})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
-    assert _sse_events(r.text) == [{"delta": "Hello "}, {"delta": "world"}, {"done": True}]
+    # The leading event names which grounding path produced the answer, so the
+    # UI can show "answered from a query" or "answered from computed facts"
+    # without inferring it from the payload's shape.
+    assert _sse_events(r.text) == [
+        {"grounding": "ledger"},
+        {"delta": "Hello "}, {"delta": "world"}, {"done": True},
+    ]
 
 
-def test_query_stream_reports_llm_errors_as_sse_event(client, monkeypatch):
+def test_query_stream_reports_llm_errors_as_sse_event(client, monkeypatch, ledger_only):
     sid = upload(client)["session_id"]
 
     class _FailingProvider:
@@ -244,8 +262,9 @@ def test_query_stream_reports_llm_errors_as_sse_event(client, monkeypatch):
     r = client.post("/query/stream", json={"session_id": sid, "question": "hi"})
     assert r.status_code == 200  # headers already sent; error travels inside the stream
     events = _sse_events(r.text)
-    assert events[0] == {"delta": "partial "}
-    assert "invalid response" in events[1]["error"]
+    assert events[0] == {"grounding": "ledger"}
+    assert events[1] == {"delta": "partial "}
+    assert "invalid response" in events[2]["error"]
 
 
 def test_query_stream_rejects_unknown_session(client):
@@ -686,7 +705,7 @@ def test_query_returns_a_validation_verdict(client, monkeypatch):
     assert body["context_coverage"]["columns_detailed"] == 3
 
 
-def test_query_context_includes_grounded_facts(client, monkeypatch):
+def test_query_context_includes_grounded_facts(client, monkeypatch, ledger_only):
     sid = upload(client)["session_id"]
     captured = {}
 
@@ -701,7 +720,7 @@ def test_query_context_includes_grounded_facts(client, monkeypatch):
     assert "LIMITS OF THIS CONTEXT" in captured["context"]
 
 
-def test_stream_emits_a_validation_event_when_the_answer_is_doubtful(client, monkeypatch):
+def test_stream_emits_a_validation_event_when_the_answer_is_doubtful(client, monkeypatch, ledger_only):
     sid = upload(client)["session_id"]
 
     class _Provider:

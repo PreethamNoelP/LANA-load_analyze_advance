@@ -34,9 +34,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     filename TEXT NOT NULL,
     active_version TEXT NOT NULL,
     last_used REAL NOT NULL,
-    has_cleaned INTEGER NOT NULL
+    has_cleaned INTEGER NOT NULL,
+    owner TEXT NOT NULL DEFAULT ''
 )
 """
+
+# Added after the table shipped, so an existing data directory has a sessions
+# table without it. SQLite has no "ADD COLUMN IF NOT EXISTS", and a failed
+# migration must not stop the app booting against an older volume.
+_MIGRATIONS = (
+    "ALTER TABLE sessions ADD COLUMN owner TEXT NOT NULL DEFAULT ''",
+)
 
 
 class PersistenceBackend:
@@ -61,6 +69,11 @@ class PersistenceBackend:
         data_dir.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(_SCHEMA)
+            for statement in _MIGRATIONS:
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass  # already applied — the only expected failure here
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path, timeout=30)
@@ -99,14 +112,16 @@ class PersistenceBackend:
                 with self._connect() as conn:
                     conn.execute(
                         "INSERT INTO sessions "
-                        "(session_id, filename, active_version, last_used, has_cleaned) "
-                        "VALUES (?, ?, ?, ?, ?) "
+                        "(session_id, filename, active_version, last_used, has_cleaned, owner) "
+                        "VALUES (?, ?, ?, ?, ?, ?) "
                         "ON CONFLICT(session_id) DO UPDATE SET "
                         "filename=excluded.filename, active_version=excluded.active_version, "
-                        "last_used=excluded.last_used, has_cleaned=excluded.has_cleaned",
+                        "last_used=excluded.last_used, has_cleaned=excluded.has_cleaned, "
+                        "owner=excluded.owner",
                         (
                             session.session_id, session.filename, session.active_version,
                             session.last_used, int(session.cleaned is not None),
+                            getattr(session, "owner", "") or "",
                         ),
                     )
         except Exception:
@@ -179,5 +194,73 @@ class PersistenceBackend:
                 "ledger": ledger,
                 "active_version": row["active_version"],
                 "last_used": row["last_used"],
+                "owner": _row_owner(row),
             })
         return results
+
+    def load_one(self, session_id: str) -> dict[str, Any] | None:
+        """Read one session from disk, or None if it is not there.
+
+        This is what makes multi-worker deployment work. Worker A handles the
+        upload and holds the frames in memory; worker B receives the next
+        request for that session id, misses its own cache, and reads the
+        frames worker A persisted instead of returning a 404. Without it,
+        every request after the first is a coin flip.
+
+        Deliberately a separate method from ``load_all``: startup wants every
+        session and pays for it once, while this is on the hot path of a cache
+        miss and must read exactly one.
+        """
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+                ).fetchone()
+        except Exception:
+            logger.warning("Could not read session %s from the index", session_id,
+                           exc_info=True)
+            return None
+        if row is None:
+            return None
+
+        sdir = self.data_dir / session_id
+        raw_path = sdir / "raw.parquet"
+        if not raw_path.exists():
+            self.delete(session_id)
+            return None
+        try:
+            raw = pd.read_parquet(raw_path)
+            cleaned = None
+            ledger = None
+            cleaned_path = sdir / "cleaned.parquet"
+            if cleaned_path.exists():
+                cleaned = pd.read_parquet(cleaned_path)
+                ledger_path = sdir / "ledger.json"
+                if ledger_path.exists():
+                    ledger = CleaningLedger.from_persisted_dict(
+                        json.loads(ledger_path.read_text(encoding="utf-8"))
+                    )
+        except Exception:
+            logger.warning("Persisted session %s is unreadable", session_id, exc_info=True)
+            self.delete(session_id)
+            return None
+
+        return {
+            "session_id": session_id,
+            "filename": row["filename"],
+            "raw": raw,
+            "cleaned": cleaned,
+            "ledger": ledger,
+            "active_version": row["active_version"],
+            "last_used": row["last_used"],
+            "owner": _row_owner(row),
+        }
+
+
+def _row_owner(row: Any) -> str:
+    """The owner column, tolerating a row written before it existed."""
+    try:
+        return row["owner"] or ""
+    except (IndexError, KeyError):
+        return ""

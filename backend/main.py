@@ -1,11 +1,16 @@
+import hashlib
 import hmac
 import json
 import logging
 import math
+import os
 import re
 import sys
 import threading
+import time
 import uuid
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -19,7 +24,10 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app import audit as audit_mod
+from app import observability as obs
 from app.analysis.regression import perform_linear_regression
+from app.analysis.sql_engine import DUCKDB_AVAILABLE
 from app.analysis.statistics import (
     analyze_correlations,
     compute_statistics,
@@ -32,10 +40,21 @@ from app.data.cleaner import apply_cleaning, detect_issues
 from app.data.profile import dataset_quality
 from app.llm import get_provider
 from app.llm.context import build_context
+from app.llm.sql_answer import SqlPlanningFailed, answer_with_sql
 from app.llm.validation import capability_summary, validate_answer
 from app.resources import HOST, UPLOAD_PEAK_MULTIPLIER, can_admit
+from app.sources import (
+    SourceError,
+    SourceSpec,
+    SourceUnavailable,
+    available_sources,
+    build_source,
+)
 from app.visualization.charts import CHART_TYPES, create_chart
+from backend.coordination import build_coordinator
 from backend.session_store import CLEANED, ORIGINAL, Session, SessionStore
+
+obs.configure_logging()
 
 try:
     from app.export.exporters import generate_pdf_report, generate_word_report
@@ -62,22 +81,320 @@ app.add_middleware(
 # carries the one shared token or it doesn't, there is no concept of "which
 # user" beyond that. /health stays open so a container healthcheck or the
 # frontend's own liveness poll doesn't need the token wired in separately.
-_AUTH_EXEMPT_PATHS = {"/health"}
+# /metrics is exempt for the same reason — a scraper is infrastructure, not a
+# user — and it exposes counts and latencies, never data or column names.
+# /auth/status is exempt for a chicken-and-egg reason: a browser has to be
+# able to ask "is a token required here?" before it can possibly have one.
+# It reveals only whether auth is switched on, which is observable anyway from
+# the 401 any other endpoint returns.
+_AUTH_EXEMPT_PATHS = {"/health", "/metrics", "/auth/session", "/auth/status"}
+
+# Name of the cookie holding a browser's proof of authentication.
+#
+# This replaces baking LANA_AUTH_TOKEN into the JavaScript bundle at build
+# time, which was not access control at all: anyone who could load the page
+# could read the token out of the bundle, and rotating it meant rebuilding the
+# frontend image. The browser now POSTs the token once to /auth/session and
+# receives an HttpOnly cookie, so the secret is never readable by page
+# scripts, never in the bundle, and revocable by changing the server's token.
+#
+# HttpOnly blocks exfiltration via XSS. SameSite=Strict is what stops a
+# cross-site request from riding the cookie, which matters because the API is
+# served with allow_credentials=True.
+AUTH_COOKIE_NAME = "lana_session"
+
+# Requests per minute per principal, and the burst a client may spend at once.
+# Generous for interactive use — a user clicking through tabs generates maybe
+# twenty requests a minute — and low enough that a runaway script or a script
+# kiddie with curl cannot occupy the machine.
+RATE_CAPACITY = float(config.limits.rate_capacity)
+RATE_REFILL_PER_SECOND = config.limits.rate_refill_per_second
+
+# The LLM endpoints get their own, much tighter bucket on top of the general
+# one. A question costs seconds of local GPU/CPU; everything else costs
+# milliseconds, so one limit cannot be right for both.
+LLM_RATE_CAPACITY = float(config.limits.llm_rate_capacity)
+LLM_RATE_REFILL_PER_SECOND = config.limits.llm_rate_refill_per_second
+
+_RATE_EXEMPT_PATHS = {"/health", "/metrics"}
+_LLM_PATHS = ("/query", "/query/stream")
+
+_coordinator = build_coordinator(
+    config.limits.data_dir if config.limits.persist_sessions else None
+)
+
+# Durable record of consequential actions — data in, transformed, out, and
+# refused. Follows persistence for the same reason the coordinator does: that
+# is the setting where there is a data directory to write to and a deployment
+# that outlives one process. See app/audit.py.
+_audit = audit_mod.build_audit_log(
+    config.limits.data_dir if config.limits.persist_sessions else None
+)
+
+
+def _record_audit(action: str, *, outcome: str = "ok", session_id: str | None = None,
+                  principal: str | None = None, **detail) -> None:
+    """Append one audit entry for the request being handled.
+
+    The principal and request id come from the request-scoped ContextVars
+    rather than parameters, so every call site records them correctly without
+    having to remember to thread them through — the same argument
+    ``_get_session`` makes about ownership.
+    """
+    _audit.record(audit_mod.AuditEntry(
+        ts=time.time(),
+        action=action,
+        principal=principal if principal is not None else obs.principal_var.get(),
+        outcome=outcome,
+        session_id=session_id,
+        request_id=obs.request_id_var.get(),
+        detail=audit_mod.scrub(detail),
+    ))
+
+
+def _principal(request: Request) -> str:
+    """A stable, non-secret identity for the caller.
+
+    With auth on, every caller shares one token, so the principal is a hash of
+    it — the same for everyone, which is correct: they *are* the same
+    principal, and that is exactly what SECURITY.md says the token is. The
+    hash rather than the token itself means a log line, a metric label or a
+    rate-limit key can never carry the secret.
+
+    With auth off, the client address stands in, so a rate limit still
+    distinguishes two machines on a LAN even though neither authenticates.
+    """
+    if config.auth_token:
+        supplied = _supplied_token(request)
+        if supplied:
+            return "tok:" + hashlib.sha256(supplied.encode()).hexdigest()[:16]
+    client = request.client.host if request.client else "unknown"
+    return f"ip:{client}"
+
+
+def _supplied_token(request: Request) -> str:
+    """The token from an Authorization header or the session cookie."""
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:]
+    return request.cookies.get(AUTH_COOKIE_NAME, "")
+
+
+def _token_ok(supplied: str) -> bool:
+    # Constant-time comparison: a length/early-exit-timing side channel is
+    # a real (if minor) way to help an attacker guess the token.
+    return bool(config.auth_token) and hmac.compare_digest(
+        supplied, config.auth_token
+    )
+
+
+def _path_template(path: str) -> str:
+    """Collapse ids out of a path so metrics have bounded cardinality.
+
+    ``/session/9f3c…`` and ``/session/1a2b…`` are the same endpoint. Labelling
+    them separately would mint one time series per upload, which is the
+    classic way to take down a Prometheus server with your own instrumentation.
+    """
+    parts = []
+    for part in path.split("/"):
+        if not part:
+            continue
+        if _looks_like_id(part):
+            parts.append("{id}")
+        else:
+            parts.append(part)
+    return "/" + "/".join(parts) if parts else "/"
+
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _looks_like_id(part: str) -> bool:
+    return bool(_UUID_RE.match(part)) or (len(part) > 16 and not part.isalpha())
+
+
+@app.middleware("http")
+async def _observe_request(request: Request, call_next):
+    """Assign a request id, time the request, and record it.
+
+    Outermost middleware, so the id exists before anything else can log and
+    the timing covers auth and rate limiting rather than just the handler.
+    """
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
+    id_token = obs.request_id_var.set(request_id)
+    principal = _principal(request)
+    principal_token = obs.principal_var.set(principal)
+    template = _path_template(request.url.path)
+
+    obs.http_in_flight.inc()
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        elapsed = time.perf_counter() - started
+        obs.http_in_flight.dec()
+        obs.http_latency.observe(elapsed, method=request.method, path=template)
+        obs.http_requests.inc(
+            method=request.method, path=template, status=str(status)
+        )
+        # One line per request, carrying the id every other line of this
+        # request also carries. This is the record that makes "why was
+        # yesterday slow" answerable at all.
+        logger.info(
+            "request",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "template": template,
+                "status": status,
+                "duration_ms": round(elapsed * 1000, 2),
+            },
+        )
+        obs.principal_var.reset(principal_token)
+        obs.request_id_var.reset(id_token)
 
 
 @app.middleware("http")
 async def _require_auth_token(request: Request, call_next):
-    token = config.auth_token
-    if token and request.url.path not in _AUTH_EXEMPT_PATHS:
-        header = request.headers.get("authorization", "")
-        supplied = header[7:] if header.lower().startswith("bearer ") else ""
-        # Constant-time comparison: a length/early-exit-timing side channel is
-        # a real (if minor) way to help an attacker guess the token.
-        if not hmac.compare_digest(supplied, token):
+    if config.auth_token and request.url.path not in _AUTH_EXEMPT_PATHS:
+        if not _token_ok(_supplied_token(request)):
+            logger.warning(
+                "unauthenticated request", extra={"path": request.url.path}
+            )
+            # A rejected credential is the event an operator most wants a
+            # durable record of, and the one a log rotation is most likely to
+            # have discarded by the time anyone asks.
+            _record_audit(
+                audit_mod.AUTH_FAILED, outcome="denied",
+                principal=_principal(request), path=request.url.path,
+            )
             return JSONResponse(
                 {"detail": "Missing or invalid auth token."}, status_code=401
             )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def _rate_limit(request: Request, call_next):
+    """Token-bucket limiting, per principal, shared across workers.
+
+    SECURITY.md listed "No rate limiting" under known limitations. It was a
+    real gap: every endpoint here does real work — parsing a file, rendering a
+    chart, running a correlation scan — and none of it was bounded by anything
+    but the LLM semaphore.
+    """
+    if request.url.path in _RATE_EXEMPT_PATHS:
+        return await call_next(request)
+
+    principal = _principal(request)
+    decision = _coordinator.check_rate(
+        f"http:{principal}", RATE_CAPACITY, RATE_REFILL_PER_SECOND
+    )
+    if not decision.allowed:
+        obs.rate_limited.inc(scope="http")
+        return JSONResponse(
+            {
+                "detail": (
+                    "Too many requests. Slow down and try again in a moment."
+                )
+            },
+            status_code=429,
+            headers={"Retry-After": str(max(1, int(decision.retry_after_seconds)))},
+        )
+
+    if request.url.path in _LLM_PATHS:
+        llm_decision = _coordinator.check_rate(
+            f"llm:{principal}", LLM_RATE_CAPACITY, LLM_RATE_REFILL_PER_SECOND
+        )
+        if not llm_decision.allowed:
+            obs.rate_limited.inc(scope="llm")
+            return JSONResponse(
+                {
+                    "detail": (
+                        "You are asking questions faster than the model can "
+                        "answer them. Wait a moment and try again."
+                    )
+                },
+                status_code=429,
+                headers={
+                    "Retry-After": str(max(1, int(llm_decision.retry_after_seconds)))
+                },
+            )
+
+    return await call_next(request)
+
+
+class AuthReq(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+
+
+@app.post("/auth/session")
+def open_auth_session(req: AuthReq, request: Request):
+    """Exchange the shared token for an HttpOnly cookie.
+
+    The browser calls this once. Afterwards the cookie authenticates it and
+    the token never touches JavaScript again — which is the whole point, since
+    the previous arrangement shipped the token inside the bundle.
+    """
+    if not config.auth_token:
+        return {"required": False, "authenticated": True}
+    if not _token_ok(req.token):
+        logger.warning("failed auth exchange")
+        raise HTTPException(401, "That token is not valid.")
+
+    response = JSONResponse({"required": True, "authenticated": True})
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        config.auth_token,
+        httponly=True,
+        samesite="strict",
+        # Set only over HTTPS when the request arrived over it. Forcing it on
+        # would break the documented plain-HTTP LAN setup by making the cookie
+        # unsettable, with no error the user could see.
+        secure=request.url.scheme == "https",
+        max_age=config.limits.auth_cookie_max_age,
+        path="/",
+    )
+    return response
+
+
+@app.get("/auth/status")
+def auth_status(request: Request):
+    """Whether auth is on, and whether this caller already satisfies it."""
+    if not config.auth_token:
+        return {"required": False, "authenticated": True}
+    return {
+        "required": True,
+        "authenticated": _token_ok(_supplied_token(request)),
+    }
+
+
+@app.post("/auth/logout")
+def close_auth_session():
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return response
+
+
+@app.get("/metrics")
+def metrics():
+    """Prometheus exposition. Counts and latencies only — never data.
+
+    Deliberately unauthenticated, like /health: a scraper is infrastructure.
+    Nothing here names a column, a value or a filename, so exposing it reveals
+    load and error rates, not anyone's dataset.
+    """
+    stats = _store.stats()
+    obs.sessions_active.set(float(stats["sessions"]))
+    obs.sessions_bytes.set(float(stats["frame_mb"]) * 1024 ** 2)
+    return Response(
+        content=obs.REGISTRY.render(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 # All read from app.config.config.limits — the single place that reads these
 # env vars, host-adaptive defaults included. Kept as module-level names here
@@ -90,8 +407,12 @@ SESSION_TTL_SECONDS = config.limits.session_ttl_seconds
 # Caps how many LLM requests run at once — a local Ollama model serves one
 # request at a time well; without this, a burst of concurrent visitors all
 # queue behind it and every answer appears to hang.
+#
+# Enforced through the coordinator rather than a threading.Semaphore, because
+# a semaphore is process-local: `uvicorn --workers 4` produced four caps of
+# two instead of one cap of two, i.e. four times the intended load on one
+# Ollama instance. See backend/coordination.py.
 MAX_CONCURRENT_LLM = config.limits.max_concurrent_llm
-_llm_semaphore = threading.Semaphore(MAX_CONCURRENT_LLM)
 _LLM_BUSY_MSG = "The AI is busy answering other questions right now — try again in a moment."
 _LLM_DOWN_MSG = (
     "The local AI model is not reachable. Check that Ollama is running "
@@ -144,6 +465,48 @@ _store = SessionStore(
 )
 
 
+def _log_security_posture() -> None:
+    """State this process's security-relevant configuration once, at startup.
+
+    Every one of these is a deliberate choice with a real consequence, and
+    every one of them is invisible at runtime — an operator who inherits a
+    running LANA has no way to tell whether the person who deployed it turned
+    the SSRF guard off. One line at boot, in the log they already collect,
+    answers that without them having to read the environment of a container.
+
+    Logged at module import rather than through a startup event: import
+    happens exactly once per worker, which is what "startup" means here, and
+    it avoids FastAPI's deprecated ``on_event`` hook.
+    """
+    from app.sources.files import allowed_roots
+    from app.sources.security import private_urls_allowed
+
+    posture = {
+        "auth": "token" if config.auth_token else "open",
+        "persist_sessions": config.limits.persist_sessions,
+        "sql_grounding": SQL_GROUNDING_ENABLED,
+        "private_source_urls": private_urls_allowed(),
+        "file_source_roots": len(allowed_roots()),
+        "cors_origins": len(config.allowed_origins),
+    }
+    logger.info("security posture", extra=posture)
+
+    # The one combination that is a live exposure rather than a choice: no
+    # token, and CORS opened to something other than the local dev defaults,
+    # which is what an operator does when they are serving LANA to a browser
+    # somewhere else. Warned about specifically, because the general startup
+    # line above would be lost in a log the first time it mattered.
+    if not config.auth_token and any(
+        "localhost" not in origin and "127.0.0.1" not in origin
+        for origin in config.allowed_origins
+    ):
+        logger.warning(
+            "LANA is configured for a non-local origin but LANA_AUTH_TOKEN is "
+            "not set: anyone who can reach this port can upload data, read "
+            "sessions and occupy the model. See SECURITY.md."
+        )
+
+
 # ── Serialisation helpers ─────────────────────────────────────────────────────
 
 def _clean(val):
@@ -181,9 +544,58 @@ def _preview(df: pd.DataFrame, rows: int = 8) -> list[dict]:
 
 # ── Session accessors ─────────────────────────────────────────────────────────
 
-def _get_session(session_id: str) -> Session:
+@contextmanager
+def _llm_slot():
+    """Hold one of the process-wide LLM slots, or raise 429.
+
+    The holder id is unique per call rather than per principal, so two
+    questions from the same browser take two slots — which is the point, since
+    each occupies the model independently.
+    """
+    holder = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
+    if not _coordinator.acquire_slot(holder, MAX_CONCURRENT_LLM):
+        obs.llm_rejected.inc(reason="busy")
+        raise HTTPException(429, _LLM_BUSY_MSG)
+    try:
+        yield
+    finally:
+        _coordinator.release_slot(holder)
+
+
+def _get_session(session_id: str, request: Request | None = None) -> Session:
+    """Fetch a session, enforcing ownership where there is any.
+
+    Before this, any caller who knew (or guessed) a session id could read that
+    session — SECURITY.md listed "No per-session ownership" as a known
+    limitation. A session now records the principal that created it, and a
+    different principal gets the same 404 a missing session gets.
+
+    404 rather than 403 on purpose: a 403 confirms the id exists, which turns
+    the endpoint into an oracle for enumerating other people's sessions. The
+    unowned case — every session created before this existed, and every
+    session in a no-auth single-user install — skips the check entirely, so
+    the local default is unchanged.
+
+    The caller's identity comes from the request-scoped ContextVar rather than
+    a ``request`` argument, deliberately: threading a parameter through all
+    eighteen endpoints would mean ownership is enforced only where someone
+    remembered to pass it, and the one that gets forgotten is the hole. The
+    ``request`` parameter is kept for callers that have one to hand and for
+    tests that want to be explicit.
+    """
     session = _store.get(session_id)
     if session is None:
+        raise HTTPException(404, "Session not found — upload a dataset first.")
+
+    caller = _principal(request) if request is not None else obs.principal_var.get()
+    if session.owner and caller and session.owner != caller:
+        logger.warning(
+            "session ownership mismatch", extra={"session_id": session_id}
+        )
+        _record_audit(
+            audit_mod.ACCESS_DENIED, outcome="denied", session_id=session_id,
+            principal=caller, reason="not the owner",
+        )
         raise HTTPException(404, "Session not found — upload a dataset first.")
     return session
 
@@ -200,6 +612,68 @@ def _session(session_id: str) -> pd.DataFrame:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+# The LLM reachability probe is cached, because /health is called by a
+# container healthcheck every 30s, by the frontend's liveness poll, and by
+# anything watching the service — and when Ollama is *down*, each probe pays a
+# full connection timeout.
+#
+# Measured, not assumed: eval/load_test.py with Ollama stopped reported
+# /health at p95 7.9s and p99 8.0s under 16 concurrent clients, by far the
+# slowest endpoint in the application. A liveness endpoint that takes eight
+# seconds precisely when a dependency is down is a healthcheck that fails the
+# container for the wrong reason.
+#
+# Five seconds is short enough that "I just started Ollama" is reflected
+# almost immediately, and long enough that a burst of health polls costs one
+# probe rather than one each.
+_LLM_PROBE_TTL_SECONDS = 5.0
+_llm_probe_cache: tuple[float, dict] | None = None
+_llm_probe_lock = threading.Lock()
+
+
+def reset_llm_probe_cache() -> None:
+    """Forget the cached reachability result.
+
+    Exists for tests, which swap the provider and then expect /health to
+    reflect the swap. Without it the cache makes those tests depend on
+    execution order and elapsed wall-clock, which is the kind of flake that
+    gets a suite ignored.
+    """
+    global _llm_probe_cache
+    _llm_probe_cache = None
+
+
+def _llm_status() -> dict:
+    """Reachability of the configured provider, cached briefly."""
+    global _llm_probe_cache
+
+    now = time.monotonic()
+    cached = _llm_probe_cache
+    if cached is not None and now - cached[0] < _LLM_PROBE_TTL_SECONDS:
+        return cached[1]
+
+    # Non-blocking: a caller that arrives while another thread is probing gets
+    # the previous answer rather than queueing behind a connection timeout.
+    # Staleness here is bounded by the TTL and is the entire point.
+    if not _llm_probe_lock.acquire(blocking=False):
+        return cached[1] if cached is not None else {
+            "available": None, "name": None, "checking": True,
+        }
+    try:
+        try:
+            provider = get_provider()
+            status = {"available": provider.is_available(), "name": provider.name}
+        except Exception as e:
+            status = {
+                "available": False, "name": None,
+                "error": _sanitize_llm_error(str(e)),
+            }
+        _llm_probe_cache = (time.monotonic(), status)
+        return status
+    finally:
+        _llm_probe_lock.release()
+
+
 @app.get("/health")
 def health():
     """Liveness plus the resource picture the limits were derived from.
@@ -213,16 +687,11 @@ def health():
     to ask a question and hit a 503. A misconfigured LLM_PROVIDER value is
     caught here too, instead of surfacing as an unhandled error on first use.
     """
-    try:
-        provider = get_provider()
-        llm = {"available": provider.is_available(), "name": provider.name}
-    except Exception as e:
-        llm = {"available": False, "name": None, "error": _sanitize_llm_error(str(e))}
     return {
         "ok": True,
         "sessions": _store.stats(),
         "host": HOST.to_dict(),
-        "llm": llm,
+        "llm": _llm_status(),
         "limits": {
             "max_upload_mb": MAX_UPLOAD_MB,
             "max_session_mb": MAX_SESSION_MB,
@@ -326,8 +795,18 @@ async def upload(file: UploadFile = File(...)):
         raise HTTPException(400, "The file parsed successfully but contains no rows.")
 
     sid = str(uuid.uuid4())
-    session = _store.create(sid, file.filename, df)
+    session = _store.create(sid, file.filename, df, owner=obs.principal_var.get())
     _store.persist(session)
+    obs.uploads.inc(kind="file", outcome="ok")
+    obs.upload_rows.observe(float(len(df)))
+    logger.info(
+        "upload complete",
+        extra={"session_id": sid, "rows": len(df), "columns": len(df.columns)},
+    )
+    _record_audit(
+        audit_mod.DATA_LOADED, session_id=sid, kind="file",
+        label=file.filename, rows=len(df), columns=len(df.columns),
+    )
 
     # Profiling is the first thing a data scientist does; surfacing it at
     # upload means the user sees what they are working with before they act.
@@ -347,6 +826,206 @@ async def upload(file: UploadFile = File(...)):
         "profiles": {name: p.to_dict() for name, p in profiles.items()},
         # What ingest actually did, so a large upload can explain itself.
         "ingest": report.to_dict(),
+    })
+
+
+# ── Connector-backed sources ─────────────────────────────────────────────────
+# Everything below produces a DataFrame and then joins the *same* pipeline the
+# upload route uses: admission against the host budget, session creation,
+# profiling, quality scoring. Nothing downstream of _admit_frame knows or cares
+# which connector produced the rows, which is what makes "same capabilities
+# regardless of source" true rather than aspirational.
+
+
+class SourceSpecReq(BaseModel):
+    kind: str = Field(max_length=50)
+    target: str = Field(default="", max_length=2000)
+    entity: str | None = Field(default=None, max_length=500)
+    # Write-only by construction: it is read into a SourceSpec and never
+    # echoed back. `to_public_dict()` cannot reach it.
+    secret: str | None = Field(default=None, max_length=2000)
+    options: dict = Field(default_factory=dict)
+
+    def to_spec(self) -> SourceSpec:
+        return SourceSpec(
+            kind=self.kind, target=self.target, entity=self.entity,
+            secret=self.secret, options=dict(self.options or {}),
+        )
+
+
+def _source_http_error(exc: SourceError) -> HTTPException:
+    """Map a connector failure to the status code that describes it.
+
+    Distinguishing these matters to the UI: a 400 means "fix your input", a
+    403 means "policy refused this", 501 means "install a driver". Collapsing
+    them to 500 would make every connector problem look like a LANA bug.
+    """
+    from app.sources import SourceConfigError, SourceConnectionError, SourceRefused
+
+    if isinstance(exc, SourceUnavailable):
+        return HTTPException(501, str(exc))
+    if isinstance(exc, SourceRefused):
+        return HTTPException(403, str(exc))
+    if isinstance(exc, SourceConfigError):
+        return HTTPException(400, str(exc))
+    if isinstance(exc, SourceConnectionError):
+        return HTTPException(502, str(exc))
+    return HTTPException(400, str(exc))
+
+
+@app.get("/sources")
+def list_sources():
+    """Every connector this build offers, generated from the registry.
+
+    The frontend's source picker renders this verbatim, so registering a new
+    connector makes it appear in the UI with no frontend change.
+    """
+    return {"sources": available_sources()}
+
+
+@app.post("/sources/test")
+def test_source(req: SourceSpecReq):
+    """Probe a connection without loading data. Backs the 'Test' button."""
+    try:
+        source = build_source(req.to_spec())
+        result = source.test_connection()
+    except SourceError as exc:
+        raise _source_http_error(exc) from exc
+
+    logger.info(
+        "source tested",
+        extra={"kind": req.kind, "ok": result.ok},
+    )
+    # Recorded because a connection attempt reaches outside LANA — it is the
+    # app touching someone else's database or an external URL, which is worth
+    # a record whether or not it succeeded.
+    _record_audit(
+        audit_mod.SOURCE_TESTED, outcome="ok" if result.ok else "failed",
+        kind=req.kind, target=req.target,
+    )
+    return result.to_dict()
+
+
+@app.post("/sources/preview")
+def preview_source(req: SourceSpecReq):
+    """A small sample plus inferred schema, for confirming this is the data."""
+    try:
+        source = build_source(req.to_spec())
+        result = source.preview()
+    except SourceError as exc:
+        raise _source_http_error(exc) from exc
+
+    frame = result.frame
+    return _jsonable({
+        "label": result.label,
+        "rows": len(frame),
+        "columns": [str(c) for c in frame.columns],
+        "dtypes": {str(c): str(frame[c].dtype) for c in frame.columns},
+        "preview": _preview(frame),
+        "notes": result.notes,
+        "row_limit_applied": result.row_limit_applied,
+    })
+
+
+def _admit_frame(df: pd.DataFrame, label: str) -> None:
+    """Apply the host memory budget to a frame that did not arrive as a file.
+
+    The upload route projects a file's cost *before* parsing it, which is not
+    possible here — a connector has already materialised the frame by the time
+    its size is knowable. So the check is after the fact but before the frame
+    is retained, which still prevents the session store from accumulating what
+    the machine cannot hold.
+    """
+    budget = MAX_SESSION_MB * 1024 * 1024
+    size = int(df.memory_usage(index=True, deep=True).sum())
+    if size > budget:
+        raise HTTPException(
+            413,
+            f"'{label}' needs about {size / 1024 ** 2:,.0f} MB of memory and the "
+            f"budget on this machine is {MAX_SESSION_MB:,} MB. Filter the source "
+            f"(fewer columns or rows), or raise LANA_MAX_SESSION_MB.",
+        )
+    ok, free = can_admit(size)
+    if not ok:
+        raise HTTPException(
+            503,
+            f"Not enough free memory right now: this dataset needs roughly "
+            f"{size / 1024 ** 2:,.0f} MB and only {free / 1024 ** 2:,.0f} MB is "
+            f"free. Close some applications and try again.",
+        )
+
+
+@app.post("/sources/load")
+async def load_source(req: SourceSpecReq, request: Request):
+    """Pull a connector's rows into a session, identical to an upload.
+
+    From the response down, this is indistinguishable from /upload: the same
+    session id, preview, quality score and profiles, so every other endpoint
+    and every frontend tab works against a Mongo collection exactly as it does
+    against a CSV.
+    """
+    try:
+        source = build_source(req.to_spec())
+        # Connectors are synchronous and can block for seconds on a slow
+        # network or a large query, so they run off the event loop for the
+        # same reason pandas' readers do in /upload.
+        result = await run_in_threadpool(
+            source.fetch, limit=config.limits.max_source_rows
+        )
+    except SourceError as exc:
+        obs.uploads.inc(kind=req.kind, outcome="error")
+        raise _source_http_error(exc) from exc
+
+    df = result.frame
+    if df.empty:
+        obs.uploads.inc(kind=req.kind, outcome="empty")
+        raise HTTPException(
+            400,
+            f"'{result.label}' connected successfully but returned no rows."
+        )
+
+    _admit_frame(df, result.label)
+    # Same lossless shrink the upload path applies. `force=True` because a
+    # connector result is often small enough to fall under OPTIMIZE_MIN_ROWS
+    # while still being repeated-text heavy — a SQL `region` column is exactly
+    # the case categorical encoding exists for, regardless of row count.
+    df, dtype_changes = await run_in_threadpool(ingest.optimize_dtypes, df, True)
+    if dtype_changes:
+        result.notes.append(
+            f"Optimised {len(dtype_changes)} column dtypes losslessly."
+        )
+
+    sid = str(uuid.uuid4())
+    session = _store.create(sid, result.label, df, owner=_principal(request))
+    _store.persist(session)
+
+    profiles = await run_in_threadpool(session.profiles)
+    quality = dataset_quality(profiles, len(df))
+
+    obs.uploads.inc(kind=req.kind, outcome="ok")
+    obs.upload_rows.observe(float(len(df)))
+    logger.info(
+        "source loaded",
+        extra={
+            "kind": req.kind, "session_id": sid,
+            "rows": len(df), "columns": len(df.columns),
+        },
+    )
+    _record_audit(
+        audit_mod.DATA_LOADED, session_id=sid, kind=req.kind,
+        label=result.label, rows=len(df), columns=len(df.columns),
+    )
+
+    return _jsonable({
+        "session_id": sid,
+        "filename": result.label,
+        "source": {"kind": req.kind, **result.to_dict()},
+        "rows": len(df),
+        "columns": df.columns.tolist(),
+        "numeric_columns": df.select_dtypes("number").columns.tolist(),
+        "preview": _preview(df),
+        "quality": quality,
+        "profiles": {name: p.to_dict() for name, p in profiles.items()},
     })
 
 
@@ -473,29 +1152,154 @@ def _build_query_context(session: Session):
     )
 
 
-@app.post("/query")
-def query(req: QueryReq):
-    session = _get_session(req.session_id)
-    context = _build_query_context(session)
-    if not _llm_semaphore.acquire(blocking=False):
-        raise HTTPException(429, _LLM_BUSY_MSG)
+# Whether executed-SQL grounding is usable at all in this process. Both
+# conditions are real: the operator can turn it off, and DuckDB is an optional
+# dependency the app must run without.
+SQL_GROUNDING_ENABLED = config.limits.sql_grounding and DUCKDB_AVAILABLE
+
+
+def _answer_with_sql_grounding(session: Session, question: str):
+    """Try the executed-query path. Returns None to fall back to the ledger.
+
+    Order matters and is the substance of the change: SQL is attempted *first*
+    because its answer is computed from the rows rather than retrieved from a
+    summary, which removes the fact-ledger coverage ceiling that caused three
+    of the seven residual failures in the measured 40-case run. The ledger
+    remains the fallback, so a question the planner cannot express in SQL is
+    answered exactly as well as it was before, never worse.
+    """
+    if not SQL_GROUNDING_ENABLED:
+        return None
     try:
         provider = get_provider()
-        answer = provider.answer_question(req.question, context.text)
-    except Exception as e:
-        raise HTTPException(*_llm_error(e)) from e
-    finally:
-        _llm_semaphore.release()
+        with obs.sql_latency.time():
+            result = answer_with_sql(provider, session.active, question)
+    except SqlPlanningFailed as exc:
+        obs.sql_queries.inc(outcome="planning_failed")
+        logger.info("SQL grounding unavailable for this question: %s", exc)
+        return None
+    except Exception as exc:
+        # An LLM transport failure is not a SQL problem, and retrying it on the
+        # ledger path would just fail again more slowly. Re-raised so the
+        # caller reports it as the 503 it is.
+        if _llm_error(exc)[0] == 503:
+            raise
+        obs.sql_queries.inc(outcome="error")
+        logger.warning("SQL grounding failed; falling back to the ledger", exc_info=exc)
+        return None
+
+    obs.sql_queries.inc(outcome="ok")
+    return result
+
+
+def _with_sql_facts(context, sql_answer):
+    """A per-request view of the context, carrying this query's facts.
+
+    The context returned by ``_build_query_context`` is **cached on the
+    session** and shared by every question asked of that version. Extending
+    its ``facts`` list in place — which is what this code used to do, despite
+    a comment claiming it copied — leaked one question's executed-SQL facts
+    into every later question on the same dataset, with three consequences:
+
+    * **A hallucinated figure could be reported as verified.** The validator
+      accepts a number that matches any fact in the context within tolerance.
+      Once question 1's query result was permanently in the ledger, question 5
+      could state a number that exists nowhere in *its* answer's evidence,
+      collide with a stale fact from question 1, and be shown to the user with
+      a green "verified against the data" mark. That is precisely the failure
+      the whole validation layer exists to prevent.
+    * **Unbounded growth.** Every question added its result's facts to a list
+      that was never trimmed, for the life of the session.
+    * **A data race.** Two questions answered concurrently for one session
+      mutated the same list.
+
+    ``replace`` builds a new ``GroundedContext`` with a fresh list and shares
+    everything else (text, ranges, vocabulary, coverage) by reference — those
+    are read-only to the validator, so this costs one small list per question
+    rather than rebuilding the context.
+    """
+    if sql_answer is None:
+        return context
+    return replace(context, facts=[*context.facts, *sql_answer.facts])
+
+
+def _record_validation(validation, path: str, session_id: str | None = None) -> None:
+    """Metrics for the claim verdicts, and one audit entry for the answer.
+
+    Together because they describe the same event and must not be able to
+    disagree about it: an answer counted as flagged in the metrics and
+    unflagged in the trail would make both useless for the question they
+    exist to answer.
+    """
+    if session_id is not None:
+        _record_audit(
+            audit_mod.QUESTION_ANSWERED,
+            outcome="flagged" if validation.warnings else "ok",
+            session_id=session_id, grounding=path,
+            numbers_checked=len(validation.claims),
+            verified=validation.verified_count,
+        )
+    for claim in validation.claims:
+        obs.validation_claims.inc(
+            verdict=claim.status, provenance=claim.provenance or "none", path=path,
+        )
+    obs.validation_answers.inc(
+        flagged=str(bool(validation.warnings)).lower(), path=path
+    )
+
+
+@app.post("/query")
+def query(req: QueryReq, request: Request):
+    session = _get_session(req.session_id, request)
+    started = time.perf_counter()
+
+    with _llm_slot():
+        try:
+            sql_answer = _answer_with_sql_grounding(session, req.question)
+        except Exception as e:
+            obs.llm_requests.inc(path="sql", outcome="error")
+            raise HTTPException(*_llm_error(e)) from e
+
+        # The ledger context is built either way: when SQL succeeds it supplies
+        # the column ranges, vocabulary and centreless-column set the validator
+        # needs to judge the prose *around* the executed figures, and when SQL
+        # is skipped it is the grounding itself.
+        # Never the cached object itself once SQL facts are involved — see
+        # _with_sql_facts for why sharing it across questions is a trust bug.
+        context = _with_sql_facts(_build_query_context(session), sql_answer)
+
+        if sql_answer is not None:
+            answer = sql_answer.answer
+            path = "sql"
+        else:
+            try:
+                provider = get_provider()
+                answer = provider.answer_question(req.question, context.text)
+            except Exception as e:
+                obs.llm_requests.inc(path="ledger", outcome="error")
+                raise HTTPException(*_llm_error(e)) from e
+            path = "ledger"
 
     # Every answer is checked against the facts that produced it — a fluent
     # local model will otherwise supply a confident number for a question the
     # context cannot answer.
     validation = validate_answer(answer, context)
-    return _jsonable({
+    _record_validation(validation, path, session_id=req.session_id)
+    obs.llm_requests.inc(path=path, outcome="ok")
+    obs.llm_latency.observe(time.perf_counter() - started, path=path)
+
+    payload = {
         "answer": answer,
         "validation": validation.to_dict(),
         "context_coverage": context.coverage,
-    })
+        "grounding": path,
+    }
+    if sql_answer is not None:
+        # The query and its result travel with the answer. This is the
+        # provenance the UI shows: not "trust me", but the exact statement that
+        # produced every figure, which the user can read and re-run.
+        payload["sql"] = sql_answer.to_dict()
+    return _jsonable(payload)
 
 
 def _sse_event(payload: dict) -> str:
@@ -505,23 +1309,58 @@ def _sse_event(payload: dict) -> str:
 
 
 def _query_stream_gen(session: Session, question: str):
-    if not _llm_semaphore.acquire(blocking=False):
+    holder = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
+    if not _coordinator.acquire_slot(holder, MAX_CONCURRENT_LLM):
+        obs.llm_rejected.inc(reason="busy")
         yield _sse_event({"error": _LLM_BUSY_MSG})
         return
+    started = time.perf_counter()
     try:
-        context = _build_query_context(session)
-        pieces: list[str] = []
+        # Planning and executing a query is not streamable — there is nothing
+        # to show until the result exists — so the SQL attempt happens up
+        # front and only the *answer* is streamed. The user sees the query
+        # that is about to ground their answer while the tokens arrive, which
+        # is better feedback than a spinner.
         try:
-            provider = get_provider()
-            for chunk in provider.answer_question_stream(question, context.text):
-                pieces.append(chunk)
-                yield _sse_event({"delta": chunk})
+            sql_answer = _answer_with_sql_grounding(session, question)
         except Exception as e:
             yield _sse_event({"error": _llm_error(e)[1]})
             return
+
+        context = _with_sql_facts(_build_query_context(session), sql_answer)
+
+        if sql_answer is not None:
+            # Announced on both paths, so the client can label an answer's
+            # provenance without inferring it from which other events arrived.
+            yield _sse_event({"grounding": "sql"})
+            yield _sse_event({"sql": sql_answer.to_dict()})
+            # The answer text was already produced by answer_with_sql. Emitted
+            # as one delta so the client's rendering path is identical for both
+            # grounding modes.
+            yield _sse_event({"delta": sql_answer.answer})
+            answer = sql_answer.answer
+            path = "sql"
+        else:
+            yield _sse_event({"grounding": "ledger"})
+            pieces: list[str] = []
+            try:
+                provider = get_provider()
+                for chunk in provider.answer_question_stream(question, context.text):
+                    pieces.append(chunk)
+                    yield _sse_event({"delta": chunk})
+            except Exception as e:
+                obs.llm_requests.inc(path="ledger", outcome="error")
+                yield _sse_event({"error": _llm_error(e)[1]})
+                return
+            answer = "".join(pieces)
+            path = "ledger"
+
         # Validation runs on the assembled answer once streaming completes, so
         # the user sees text immediately and the trust signal arrives with it.
-        validation = validate_answer("".join(pieces), context)
+        validation = validate_answer(answer, context)
+        _record_validation(validation, path, session_id=session.session_id)
+        obs.llm_requests.inc(path=path, outcome="ok")
+        obs.llm_latency.observe(time.perf_counter() - started, path=path)
         # Emitted when there is something to report either way — a warning, or
         # confirmation that the figures matched. An answer containing no
         # numbers has nothing to say, so the wire stays quiet.
@@ -529,17 +1368,43 @@ def _query_stream_gen(session: Session, question: str):
             yield _sse_event({"validation": validation.to_dict()})
         yield _sse_event({"done": True})
     finally:
-        _llm_semaphore.release()
+        _coordinator.release_slot(holder)
 
 
 @app.post("/query/stream")
-def query_stream(req: QueryReq):
-    session = _get_session(req.session_id)
+def query_stream(req: QueryReq, request: Request):
+    session = _get_session(req.session_id, request)
     return StreamingResponse(
         _query_stream_gen(session, req.question),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/audit")
+def audit_trail(
+    request: Request,
+    limit: int = Query(100, ge=1, le=audit_mod.MAX_READ_ENTRIES),
+    session_id: str | None = Query(None, max_length=200),
+):
+    """The caller's own recent actions, newest first.
+
+    Scoped to the calling principal, always — the same rule sessions follow.
+    Reading the trail must not become a way to observe someone else's
+    activity, which would make the auditability feature its own disclosure.
+
+    ``enabled`` is reported explicitly rather than inferred from an empty
+    list: "nothing happened" and "nothing is being recorded" are very
+    different answers, and a UI that conflated them would quietly imply the
+    first when the second is true.
+    """
+    principal = _principal(request)
+    return {
+        "enabled": bool(getattr(_audit, "enabled", False)),
+        "entries": _audit.read(
+            principal=principal, session_id=session_id, limit=limit
+        ),
+    }
 
 
 @app.get("/validator/capabilities")
@@ -741,7 +1606,15 @@ def _csv_chunks(df: pd.DataFrame):
 
 @app.get("/export/csv/{session_id}")
 def export_csv(session_id: str):
-    df = _session(session_id)
+    session = _get_session(session_id)
+    df = session.active
+    # Recorded before the stream starts, not after: the response body is
+    # produced lazily by a generator, so "after" would mean after the client
+    # finished reading — and an export abandoned halfway still left with rows.
+    _record_audit(
+        audit_mod.DATA_EXPORTED, session_id=session_id, format="csv",
+        rows=len(df), version=session.active_version, label=session.filename,
+    )
     return StreamingResponse(
         _csv_chunks(df),
         media_type="text/csv",
@@ -782,6 +1655,11 @@ def export_pdf(session_id: str):
         )
     except Exception as e:
         raise HTTPException(500, f"PDF generation failed: {e}") from e
+    _record_audit(
+        audit_mod.DATA_EXPORTED, session_id=session_id, format="pdf",
+        rows=len(session.active), version=session.active_version,
+        label=session.filename,
+    )
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": 'attachment; filename="lana_report.pdf"'})
 
@@ -800,6 +1678,11 @@ def export_docx(session_id: str):
         )
     except Exception as e:
         raise HTTPException(500, f"Word report generation failed: {e}") from e
+    _record_audit(
+        audit_mod.DATA_EXPORTED, session_id=session_id, format="docx",
+        rows=len(session.active), version=session.active_version,
+        label=session.filename,
+    )
     return Response(
         content=docx,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -840,6 +1723,14 @@ def clean_apply(session_id: str, req: CleanReq):
     _store.enforce_limits()
     _store.persist(session)
     summary = ledger.summary(len(df))
+    # The operation *types* only. Which columns were filled and with what is
+    # the lineage ledger's job, and it travels with the data; duplicating it
+    # here would put column names in a second file for no added answer.
+    _record_audit(
+        audit_mod.DATA_CLEANED, session_id=session_id,
+        operations=len(ops), rows_before=len(df), rows_after=len(cleaned),
+        kinds=",".join(sorted({o["type"] for o in ops})),
+    )
 
     return _jsonable({
         "rows_before": len(df),
@@ -865,6 +1756,12 @@ def set_version(session_id: str, req: VersionReq):
         raise HTTPException(400, "No cleaned version available. Apply cleaning first.") from e
     # Metadata only — the frames themselves are unchanged by a version switch.
     _store.persist(session, frames=False)
+    # Worth recording because every later answer, chart and export silently
+    # changes meaning: "the numbers were wrong that afternoon" is usually this.
+    _record_audit(
+        audit_mod.DATA_VERSION_SWITCHED, session_id=session_id,
+        version=req.version,
+    )
     return {"version": req.version}
 
 
@@ -872,3 +1769,8 @@ def set_version(session_id: str, req: VersionReq):
 def clean_status(session_id: str):
     """Whether a cleaned version exists, which is active, and how it was produced."""
     return _jsonable(_get_session(session_id).status())
+
+
+# Last line of the module on purpose: it reports SQL_GROUNDING_ENABLED and the
+# connector policy, both of which are decided further down the file.
+_log_security_posture()

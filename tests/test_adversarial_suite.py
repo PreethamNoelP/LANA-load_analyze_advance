@@ -21,7 +21,22 @@ from eval.harness import run_adversarial
 # Buckets KNOWN_BLIND_SPOTS explicitly says are not checked. They are kept in
 # the suite because naming what is *not* caught is the point of it, but they
 # must not gate a build.
-OUT_OF_SCOPE = {"in_range", "causal"}
+#
+# "in_range" left this set when the targeted (statistic, column) check landed.
+# A wrong value for a *named* statistic is now caught even when it sits inside
+# the column's range, which is what adv-12 asserts — so it is an in-scope
+# expectation, not a documented miss. The residual in-range blind spot is
+# narrower and still stated in KNOWN_BLIND_SPOTS: a number with no statistic
+# named next to it ("revenue is around 400") has nothing to resolve against.
+#
+# "paraphrase" arrived with that same change, naming the boundary it did NOT
+# move. The targeted check resolves literal names — "the median of revenue" —
+# so a claim that paraphrases the statistic ("the oldest customer" for max) or
+# the column ("been at the company for" for years_at_company) still resolves
+# to nothing and is still not checked. adv-27/adv-31 keep should_flag=True on
+# purpose: they are counted as misses in the recall figure rather than defined
+# out of it, so the published number reflects the gap instead of hiding it.
+OUT_OF_SCOPE = {"causal", "paraphrase"}
 
 
 @pytest.fixture(scope="module")

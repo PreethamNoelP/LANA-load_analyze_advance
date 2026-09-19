@@ -476,7 +476,13 @@ def test_validation_flags_a_fabricated_figure(sales_df):
     )
     assert result.unsupported_count >= 1
     assert result.trustworthy is False
-    assert "do not match any statistic" in result.warnings[0]
+    # The warning names the specific statistic the claim resolved to and what
+    # LANA actually computed for it. This used to be the generic "these
+    # numbers match nothing" message; the targeted check can say which figure
+    # was claimed and what the real one is, which is the difference between a
+    # warning a reader can act on and one they can only distrust.
+    assert "mean of 'revenue'" in result.warnings[0]
+    assert result.claims[0].targeted is True
 
 
 def test_validation_catches_an_explicit_wrong_boolean_label():
@@ -555,6 +561,14 @@ def test_validation_catches_one_column_stat_labelled_as_another():
     assert result.misattributed_count == 1
     assert result.verified_count == 0
     assert result.trustworthy is False
+    # Reached by resolving the claim to marketing_spend's own mean and finding
+    # the quoted value is revenue's instead, rather than by the sibling scan
+    # noticing a family collision. The note has to carry both halves: what the
+    # figure should have been, and where the quoted one actually came from.
+    claim = result.claims[0]
+    assert claim.targeted is True
+    assert "mean of 'marketing_spend'" in claim.note
+    assert "'revenue'" in claim.note
 
 
 def test_column_stat_attribution_does_not_flag_the_correct_label():

@@ -86,6 +86,58 @@ class LimitsConfig:
     )
     data_dir: str = field(default_factory=lambda: os.getenv("LANA_DATA_DIR", "data"))
 
+    # ── Rate limiting ────────────────────────────────────────────────────────
+    # Token bucket per principal. `capacity` is the burst a client may spend
+    # at once; `refill_per_second` is the sustained rate it recovers at.
+    #
+    # 120 burst / 2 per second suits interactive use — clicking through tabs
+    # is maybe twenty requests a minute, and a page load that fires a dozen
+    # calls at once must not trip it — while still bounding a runaway script.
+    rate_capacity: int = field(
+        default_factory=lambda: int(os.getenv("LANA_RATE_CAPACITY", "120"))
+    )
+    rate_refill_per_second: float = field(
+        default_factory=lambda: float(os.getenv("LANA_RATE_REFILL_PER_SECOND", "2.0"))
+    )
+    # Questions are seconds of local inference, not milliseconds of pandas, so
+    # they get their own far tighter bucket: a burst of twenty, then thirty a
+    # minute sustained. Deliberately above what one person can actually
+    # consume — a local model answering in 3-8s cannot be asked faster than
+    # this anyway — so the limit bounds a runaway client without ever being
+    # felt by a legitimate one. Concurrency is capped separately, by the LLM
+    # slot leases, which is the control that protects the model itself.
+    llm_rate_capacity: int = field(
+        default_factory=lambda: int(os.getenv("LANA_LLM_RATE_CAPACITY", "20"))
+    )
+    llm_rate_refill_per_second: float = field(
+        default_factory=lambda: float(
+            os.getenv("LANA_LLM_RATE_REFILL_PER_SECOND", "0.5")
+        )
+    )
+
+    # How long a browser's auth cookie stays valid. Twelve hours: long enough
+    # that a working day needs one sign-in, short enough that a shared machine
+    # does not stay authenticated indefinitely.
+    auth_cookie_max_age: int = field(
+        default_factory=lambda: int(os.getenv("LANA_AUTH_COOKIE_MAX_AGE", "43200"))
+    )
+
+    # Rows a connector may pull in one load. Remote sources have no natural
+    # size limit, so this is the equivalent of the upload cap for everything
+    # that is not a file upload.
+    max_source_rows: int = field(
+        default_factory=lambda: int(os.getenv("LANA_MAX_SOURCE_ROWS", "200000"))
+    )
+
+    # Whether a question may be answered by generating and executing SQL
+    # against the session's data (app/analysis/sql_engine.py). On by default:
+    # it is measurably more accurate than the fact ledger and is sandboxed.
+    # Set false to fall back to ledger-only grounding everywhere.
+    sql_grounding: bool = field(
+        default_factory=lambda: os.getenv("LANA_SQL_GROUNDING", "true").lower()
+        in ("1", "true", "yes")
+    )
+
 
 @dataclass
 class AppConfig:
