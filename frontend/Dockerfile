@@ -8,11 +8,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-# Baked into the JS bundle at build time (Vite only exposes import.meta.env.VITE_*
-# variables that existed when `vite build` ran) — see src/api.js. Leave unset
-# for the default, no-auth setup.
-ARG VITE_LANA_AUTH_TOKEN=""
-ENV VITE_LANA_AUTH_TOKEN=$VITE_LANA_AUTH_TOKEN
+# No auth token is baked in. It used to be, via VITE_LANA_AUTH_TOKEN, which
+# meant the secret shipped inside the JavaScript where any visitor could read
+# it and rotating it required rebuilding this image. The browser now exchanges
+# the token for an HttpOnly cookie at runtime (POST /auth/session), so this
+# build is identical whether or not auth is enabled.
 RUN npm run build
 
 FROM nginx:1.27-alpine

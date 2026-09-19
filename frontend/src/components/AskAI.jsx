@@ -56,6 +56,157 @@ const cs = {
   list: { margin: '0 0 0 18px', padding: 0 },
 }
 
+// The provenance of an answer's figures, shown rather than asserted.
+//
+// LANA answers a question two ways. The strong path plans a SQL query, runs it
+// against the session's actual rows in a sandbox, and answers from the result
+// table — so every figure is a computation, not a recollection. The fallback
+// path answers from a precomputed fact ledger. Which one ran is the single
+// most useful thing a user can know about how much to trust a number, and
+// until now the backend streamed it and the interface discarded it.
+//
+// Collapsed by default: the badge is the everyday signal, the statement and
+// its result are for the moment someone wants to check the work — or re-run it
+// themselves, which is the strongest form of "you do not have to take our
+// word for it".
+// A result cell as a person reads it, not as DuckDB serialises it.
+//
+// An average comes back as 267.5210191082802. Printing that verbatim makes
+// the evidence table harder to read than the sentence it is supposed to
+// justify, and it will not match the answer's "267.52" by eye — which defeats
+// the point, since checking the two against each other is the only reason
+// this table is on screen.
+//
+// Two decimals and thousands separators for anything fractional; integers
+// stay integers, because a count of 157 orders is not 157.00.
+function cell(value) {
+  if (value === null || value === undefined) return '—'
+  if (typeof value !== 'number' || !Number.isFinite(value)) return String(value)
+  if (Number.isInteger(value)) return value.toLocaleString()
+  // Very small magnitudes (a correlation of 0.0032, a p-value) would round to
+  // 0.00 and lose the only information they carry.
+  const decimals = Math.abs(value) < 0.01 ? 6 : 2
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: decimals,
+  })
+}
+
+
+function Provenance({ sql, grounding }) {
+  const [open, setOpen] = useState(false)
+  if (!grounding && !sql) return null
+
+  const executed = Boolean(sql)
+  const rows = sql?.rows || []
+  const columns = sql?.columns || []
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={ps.row}>
+        <span style={{ ...ps.badge, ...(executed ? ps.badgeExecuted : ps.badgeLedger) }}>
+          {executed ? '⚡ Computed by query' : '◇ From computed summary'}
+        </span>
+        {executed && (
+          <button style={ps.toggle} onClick={() => setOpen(o => !o)}>
+            {open ? 'Hide the query' : 'Show the query and its result'}
+          </button>
+        )}
+      </div>
+
+      {executed && open && (
+        <div style={ps.body}>
+          <div style={ps.caption}>
+            Run against your data
+            {sql.elapsed_ms != null && ` · ${Math.round(sql.elapsed_ms)} ms`}
+            {sql.attempts > 1 && ` · ${sql.attempts} attempts`}
+          </div>
+          <pre style={ps.sql}>{sql.sql}</pre>
+
+          {columns.length > 0 && (
+            <>
+              <div style={ps.caption}>
+                Result — every figure in the answer above comes from this table
+              </div>
+              <div style={ps.tableWrap}>
+                <table style={ps.table}>
+                  <thead>
+                    <tr>{columns.map(c => <th key={c} style={ps.th}>{c}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {rows.slice(0, 25).map((r, i) => (
+                      <tr key={i}>
+                        {r.map((v, j) => (
+                          <td key={j} style={ps.td}>{cell(v)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {(rows.length > 25 || sql.truncated) && (
+                <div style={ps.caption}>
+                  Showing the first 25 rows
+                  {sql.truncated && ' — the result was capped before this point'}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const ps = {
+  row: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
+  badge: {
+    fontSize: 11, fontWeight: 600, padding: '3px 9px', borderRadius: 20,
+    fontFamily: 'var(--ff-mono)', whiteSpace: 'nowrap',
+  },
+  badgeExecuted: {
+    color: 'var(--green)', background: 'rgba(78,199,127,0.12)',
+    border: '1px solid rgba(78,199,127,0.3)',
+  },
+  badgeLedger: {
+    color: 'var(--muted)', background: 'rgba(255,255,255,0.05)',
+    border: '1px solid var(--border)',
+  },
+  toggle: {
+    background: 'transparent', border: 'none', padding: 0,
+    color: 'var(--muted)', fontSize: 11.5, cursor: 'pointer',
+    fontFamily: 'var(--ff-ui)', textDecoration: 'underline',
+  },
+  body: {
+    marginTop: 10, padding: '12px 14px', background: 'var(--bg)',
+    border: '1px solid var(--border)', borderRadius: 8,
+  },
+  caption: {
+    fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--ff-mono)',
+    marginBottom: 6,
+  },
+  sql: {
+    margin: '0 0 12px', padding: '10px 12px', background: 'var(--surface)',
+    border: '1px solid var(--border)', borderRadius: 6,
+    fontSize: 12, lineHeight: 1.6, fontFamily: 'var(--ff-mono)',
+    color: 'var(--text)', overflowX: 'auto', whiteSpace: 'pre-wrap',
+  },
+  // Bounded height: a 200-row result must not push the next message off screen.
+  tableWrap: { overflow: 'auto', maxHeight: 260, border: '1px solid var(--border)', borderRadius: 6 },
+  table: { borderCollapse: 'collapse', width: '100%', fontSize: 12 },
+  th: {
+    textAlign: 'left', padding: '7px 10px', background: 'var(--surface)',
+    color: 'var(--muted)', fontWeight: 600, fontFamily: 'var(--ff-mono)',
+    borderBottom: '1px solid var(--border)', position: 'sticky', top: 0,
+    whiteSpace: 'nowrap',
+  },
+  td: {
+    padding: '6px 10px', borderBottom: '1px solid var(--border)',
+    fontFamily: 'var(--ff-mono)', color: 'var(--text)', whiteSpace: 'nowrap',
+  },
+}
+
+
 function Message({ msg }) {
   return (
     <div style={{ marginBottom: 28 }}>
@@ -153,6 +304,11 @@ function Message({ msg }) {
               </div>
             )
           })()}
+
+          {/* Where the figures came from. Placed after the warnings so a
+              problem is read first, and before the footer so the statement
+              sits with the answer it produced. */}
+          <Provenance sql={msg.sql} grounding={msg.grounding} />
 
           <div style={{
             marginTop: 10, fontSize: 11,

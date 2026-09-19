@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import Landing from './components/Landing.jsx'
 import Sidebar from './components/Sidebar.jsx'
 import Upload from './components/Upload.jsx'
+import SourcePicker from './components/SourcePicker.jsx'
 import DataPreview from './components/DataPreview.jsx'
 import KpiTiles from './components/KpiTiles.jsx'
 import AskAI from './components/AskAI.jsx'
@@ -46,6 +47,21 @@ export default function App() {
   const [restoring, setRestoring] = useState(true)
   const [restoreError, setRestoreError] = useState(null)
   const [retryToken, setRetryToken] = useState(0)
+  // 'file' or 'connect'. A file upload stays the default because it is
+  // still the common case; connectors are one click away rather than in
+  // front of someone who just wants to drop a CSV.
+  const [ingestMode, setIngestMode] = useState('file')
+
+  // Every ingest path ends here, so a connector-backed session is set up
+  // identically to an uploaded one — same tab, same version state. Anything
+  // that diverged would be a bug waiting for whichever path was tested less.
+  function startSession(sess) {
+    setSession(sess)
+    setTab('askai')
+    setCleanVersion('original')
+    setHasCleanedData(false)
+    setAiMessages([])
+  }
 
   // AskAI state — lifted here so messages survive tab switches
   // and so we can control the fixed-input / scrollable-messages split
@@ -174,17 +190,27 @@ export default function App() {
     let answer = ''
     try {
       let validation = null
+      // Provenance. The backend goes to real lengths to answer from a query it
+      // actually ran against the rows, and streams the statement and its
+      // result alongside the prose — but the UI used to drop both events on
+      // the floor, which left "every figure is computed, not recalled" as a
+      // claim in the README that a user had no way to check. Kept per message
+      // so it can be shown with the answer it produced.
+      let sql = null
+      let grounding = null
       for await (const evt of streamQuery(session.session_id, question)) {
         if (evt.type === 'delta') answer += evt.text
         // Arrives once, after the full answer has been checked against the
         // facts LANA computed — a flag on figures the data does not support.
         else if (evt.type === 'validation') validation = evt.validation
+        else if (evt.type === 'sql') sql = evt.sql
+        else if (evt.type === 'grounding') grounding = evt.grounding
         setAiMessages(prev => prev.map(m =>
-          m.id === id ? { ...m, loading: false, a: answer, validation } : m))
+          m.id === id ? { ...m, loading: false, a: answer, validation, sql, grounding } : m))
       }
       // Covers an empty-but-successful stream (no deltas emitted) — still clear "loading".
       setAiMessages(prev => prev.map(m =>
-        m.id === id ? { ...m, loading: false, a: answer, validation } : m))
+        m.id === id ? { ...m, loading: false, a: answer, validation, sql, grounding } : m))
     } catch (e) {
       // Keep whatever already streamed in. The user has been reading it as it
       // arrived; replacing a near-complete answer with a bare error message
@@ -278,13 +304,23 @@ export default function App() {
         </div>
 
         {!session ? (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <Upload onUpload={sess => {
-              setSession(sess)
-              setTab('askai')
-              setCleanVersion('original')
-              setHasCleanedData(false)
-            }} />
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+            {ingestMode === 'file' ? (
+              <>
+                <Upload onUpload={startSession} />
+                <button
+                  style={s.connectLink}
+                  onClick={() => setIngestMode('connect')}
+                >
+                  or connect a database, API or URL →
+                </button>
+              </>
+            ) : (
+              <SourcePicker
+                onLoaded={startSession}
+                onCancel={() => setIngestMode('file')}
+              />
+            )}
           </div>
         ) : (
           <div style={s.sessionShell}>
@@ -466,6 +502,11 @@ const s = {
   modelPill: { fontSize: 12, fontFamily: 'var(--ff-mono)', color: 'var(--muted)', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 20, padding: '3px 10px' },
   avatar:   { width: 30, height: 30, borderRadius: '50%', background: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, color: '#fff' },
 
+  connectLink: {
+    alignSelf: 'center', margin: '0 0 28px', padding: '8px 14px',
+    background: 'none', border: 'none', cursor: 'pointer',
+    color: 'var(--text-dim)', fontSize: 13.5, textDecoration: 'underline',
+  },
   sessionShell: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
 
   subHeader: { flexShrink: 0, background: 'var(--bg)', borderBottom: '1px solid var(--border)', padding: '14px 32px 0' },

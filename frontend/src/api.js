@@ -1,14 +1,20 @@
 const BASE = '/api'
 
-// Empty unless the frontend was built with VITE_LANA_AUTH_TOKEN set (see
-// frontend/Dockerfile) — Vite only exposes import.meta.env.VITE_* variables
-// that existed at build time, so this can't be changed at runtime. Matches
-// the backend's LANA_AUTH_TOKEN gate, which is off by default (every
-// endpoint open) and only enforced when that variable is set server-side.
-const AUTH_TOKEN = import.meta.env.VITE_LANA_AUTH_TOKEN || ''
-
+// Authentication is a cookie the server sets, not a value compiled into this
+// bundle.
+//
+// It used to be `import.meta.env.VITE_LANA_AUTH_TOKEN`, baked in at build
+// time. That was not access control: anyone who could load the page could
+// read the token straight out of the JavaScript, and rotating it meant
+// rebuilding and redeploying the frontend image. The token now goes to
+// POST /auth/session once; the server replies with an HttpOnly cookie that
+// this code cannot read and an XSS payload cannot steal.
+//
+// `credentials: 'include'` is what carries that cookie. It is required rather
+// than incidental — without it the browser omits the cookie on every
+// cross-origin call and every request 401s.
 function withAuthHeader(headers) {
-  return AUTH_TOKEN ? { ...headers, Authorization: `Bearer ${AUTH_TOKEN}` } : headers
+  return headers
 }
 
 // Nothing here may hang forever. Without a deadline a stalled connection
@@ -50,6 +56,9 @@ async function request(path, { timeoutMs = DEFAULT_TIMEOUT_MS, headers, ...init 
     return await fetch(`${BASE}${path}`, {
       ...init,
       headers: withAuthHeader(headers),
+      // Sends the HttpOnly auth cookie. Without it the browser omits the
+      // cookie on cross-origin calls and every request 401s.
+      credentials: 'include',
       signal: controller.signal,
     })
   } catch (e) {
@@ -89,6 +98,13 @@ export async function getSessionInfo(sessionId) {
 
 // Yields events as the model generates its answer, parsing the backend's
 // `data: {...}\n\n` SSE frames from /query/stream:
+//   { type: 'grounding', grounding }   — which path answered: 'sql' when the
+//                                        figures came from a query executed
+//                                        against the rows, 'ledger' when they
+//                                        came from precomputed facts
+//   { type: 'sql', sql }               — the executed statement and its result,
+//                                        so the answer's provenance is shown
+//                                        rather than asserted
 //   { type: 'delta', text }            — the next chunk of answer text
 //   { type: 'validation', validation } — the trust verdict, sent once the
 //                                        full answer has been checked against
@@ -102,6 +118,7 @@ export async function* streamQuery(sessionId, question) {
     res = await fetch(`${BASE}/query/stream`, {
       method: 'POST',
       headers: withAuthHeader({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
       body: JSON.stringify({ session_id: sessionId, question }),
     })
   } catch {
@@ -130,6 +147,8 @@ export async function* streamQuery(sessionId, question) {
       const payload = JSON.parse(rawEvent.slice('data: '.length))
       if (payload.error) throw new Error(payload.error)
       if (payload.done) return
+      if (payload.grounding) yield { type: 'grounding', grounding: payload.grounding }
+      if (payload.sql) yield { type: 'sql', sql: payload.sql }
       if (payload.delta) yield { type: 'delta', text: payload.delta }
       if (payload.validation) yield { type: 'validation', validation: payload.validation }
     }
@@ -246,4 +265,72 @@ export async function switchVersion(sessionId, version) {
 
 export async function getCleanStatus(sessionId) {
   return ok(await request(`/clean/status/${encodeURIComponent(sessionId)}`))
+}
+
+
+/* ── Authentication ────────────────────────────────────────────────────────
+ *
+ * Only relevant when the server has LANA_AUTH_TOKEN set. In the default
+ * single-user local setup `getAuthStatus()` reports `required: false` and the
+ * UI never asks for anything.
+ */
+
+export async function getAuthStatus() {
+  return ok(await request('/auth/status'))
+}
+
+export async function openAuthSession(token) {
+  const res = await request('/auth/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  })
+  if (res.status === 401) {
+    throw new ApiError('That token was not accepted.', { status: 401 })
+  }
+  return ok(res)
+}
+
+export async function closeAuthSession() {
+  return ok(await request('/auth/logout', { method: 'POST' }))
+}
+
+
+/* ── Data sources ──────────────────────────────────────────────────────────
+ *
+ * The picker is rendered from `listSources()` rather than a hardcoded list,
+ * so a connector registered on the backend appears here with no change to
+ * this file.
+ */
+
+export async function listSources() {
+  return ok(await request('/sources'))
+}
+
+export async function testSource(spec) {
+  return ok(await request('/sources/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(spec),
+  }))
+}
+
+export async function previewSource(spec) {
+  return ok(await request('/sources/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(spec),
+    timeoutMs: ANALYSIS_TIMEOUT_MS,
+  }))
+}
+
+export async function loadSource(spec) {
+  return ok(await request('/sources/load', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(spec),
+    // A connector can legitimately spend a long time on a big query or a slow
+    // network, so it gets the upload deadline rather than the metadata one.
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+  }))
 }
