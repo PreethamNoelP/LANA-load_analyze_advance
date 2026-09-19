@@ -1,0 +1,173 @@
+{
+  "load": {
+    "mode": "http",
+    "concurrency": 12,
+    "dataset_rows": 10000,
+    "uploads": {
+      "name": "POST /upload",
+      "n": 12,
+      "ok": 12,
+      "errors": 0,
+      "statuses": {
+        "200": 12
+      },
+      "p50_ms": 629.9,
+      "p95_ms": 634.4,
+      "p99_ms": 638.5,
+      "max_ms": 638.5,
+      "mean_ms": 625.6
+    },
+    "endpoints": [
+      {
+        "name": "GET /session",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 39.4,
+        "p95_ms": 208.0,
+        "p99_ms": 208.0,
+        "max_ms": 208.0,
+        "mean_ms": 67.2
+      },
+      {
+        "name": "GET /profile",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 29.0,
+        "p95_ms": 191.1,
+        "p99_ms": 191.1,
+        "max_ms": 191.1,
+        "mean_ms": 53.3
+      },
+      {
+        "name": "GET /correlation",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 76.8,
+        "p95_ms": 140.8,
+        "p99_ms": 140.8,
+        "max_ms": 140.8,
+        "mean_ms": 80.9
+      },
+      {
+        "name": "GET /recommendations",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 80.6,
+        "p95_ms": 242.5,
+        "p99_ms": 242.5,
+        "max_ms": 242.5,
+        "mean_ms": 114.2
+      },
+      {
+        "name": "GET /stats",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 193.6,
+        "p95_ms": 375.0,
+        "p99_ms": 375.0,
+        "max_ms": 375.0,
+        "mean_ms": 203.7
+      },
+      {
+        "name": "POST /chart",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 1954.6,
+        "p95_ms": 2569.7,
+        "p99_ms": 2569.7,
+        "max_ms": 2569.7,
+        "mean_ms": 2053.9
+      },
+      {
+        "name": "GET /clean/preview",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 562.1,
+        "p95_ms": 742.5,
+        "p99_ms": 742.5,
+        "max_ms": 742.5,
+        "mean_ms": 564.4
+      },
+      {
+        "name": "GET /export/csv",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 215.9,
+        "p95_ms": 315.9,
+        "p99_ms": 315.9,
+        "max_ms": 315.9,
+        "mean_ms": 206.6
+      },
+      {
+        "name": "GET /health",
+        "n": 8,
+        "ok": 8,
+        "errors": 0,
+        "statuses": {
+          "200": 8
+        },
+        "p50_ms": 31.6,
+        "p95_ms": 4076.1,
+        "p99_ms": 4076.1,
+        "max_ms": 4076.1,
+        "mean_ms": 559.3
+      }
+    ],
+    "totals": {
+      "requests": 84,
+      "wall_seconds": 4.72,
+      "throughput_rps": 17.8,
+      "errors": 0
+    },
+    "memory": {
+      "rss_start_mb": 98.2,
+      "rss_after_uploads_mb": 98.6,
+      "rss_end_mb": 102.1,
+      "growth_mb": 4.0,
+      "sessions_created": 12
+    }
+  },
+  "admission": {
+    "host_limit_mb": 671,
+    "probe_limit_mb": 671,
+    "limit_forced_for_probe": false,
+    "offered_bytes": 1200006,
+    "status": 200,
+    "refused": false,
+    "refused_cleanly": true,
+    "detail": "accepted \u2014 payload is within this host's budget; run with --url against a server configured with a low LANA_MAX_UPLOAD_MB to force the refusal path over real HTTP",
+    "process_alive": true
+  }
+}

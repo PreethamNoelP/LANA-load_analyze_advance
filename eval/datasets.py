@@ -93,3 +93,135 @@ def employee_survey(seed: int = 20260202, n: int = 400) -> pd.DataFrame:
     years_missing = rng.choice(n, size=int(n * 0.07), replace=False)
     df.loc[years_missing, "years_at_company"] = np.nan
     return df
+
+
+def messy_support_tickets(seed: int = 20260303, n: int = 600) -> pd.DataFrame:
+    """A deliberately dirty dataset, shaped like data people actually have.
+
+    ``retail_orders`` and ``employee_survey`` are clean: correct dtypes, tidy
+    category labels, missingness only where it was put on purpose. That makes
+    them a fair test of statistical correctness and an unfair test of
+    everything else, and the audit said so — the benchmark had "no real-world
+    messy dataset", so a measured accuracy figure was an accuracy figure on
+    the easy case.
+
+    Every defect below is one that shows up in a real export, and each one
+    breaks a different part of the pipeline if it is not handled:
+
+    * **Numbers stored as text**, with currency symbols, thousands separators
+      and stray whitespace (``" $1,234.50 "``). A profiler that trusts dtypes
+      calls this a text column and computes nothing; a SQL planner that casts
+      blindly gets NULLs.
+    * **Mixed date formats** in one column — ISO, US, European and a bare
+      year. Real exports concatenate systems, and pandas silently produces
+      ``object`` rather than failing.
+    * **Inconsistent category casing and whitespace** (``"Email"``,
+      ``"email"``, ``" EMAIL "``), which splits one category into four and
+      makes every share and group-by wrong rather than merely imprecise.
+    * **Several spellings of missing** — empty string, ``"N/A"``, ``"null"``,
+      ``"-"``, ``"unknown"`` — none of which pandas reads as NaN, so the null
+      rate looks like zero while half the column is absent.
+    * **Duplicated rows**, including near-duplicates differing only in
+      whitespace.
+    * **A high-cardinality free-text column** that must not be grouped.
+    * **An extreme outlier** two orders of magnitude out, which drags a mean
+      somewhere no median goes.
+    * **A column that is entirely one value**, and one that is entirely empty.
+
+    Seeded, so the defects land in the same rows on every run and a
+    ground-truth figure computed once stays correct.
+    """
+    rng = np.random.default_rng(seed)
+
+    priority = rng.choice(["low", "medium", "high", "critical"], size=n,
+                          p=[0.35, 0.35, 0.22, 0.08])
+
+    # Channel, with the casing/whitespace inconsistency intact.
+    base_channel = rng.choice(["email", "phone", "chat"], size=n, p=[0.5, 0.3, 0.2])
+    channel_variants = {
+        "email": ["email", "Email", "EMAIL", " email "],
+        "phone": ["phone", "Phone", "phone "],
+        "chat": ["chat", "Chat", " Chat"],
+    }
+    channel = [
+        channel_variants[c][rng.integers(0, len(channel_variants[c]))]
+        for c in base_channel
+    ]
+
+    # Resolution hours as text with currency-style noise, plus several
+    # spellings of "missing" that pandas will not recognise.
+    true_hours = np.round(rng.exponential(6.0, size=n) + 0.5, 1)
+    missing_tokens = ["", "N/A", "null", "-", "unknown", "NULL", "n/a"]
+    hours_text = []
+    for value in true_hours:
+        if rng.random() < 0.12:
+            hours_text.append(missing_tokens[rng.integers(0, len(missing_tokens))])
+        elif rng.random() < 0.25:
+            hours_text.append(f" {value:,.1f} ")
+        else:
+            hours_text.append(f"{value:.1f}")
+
+    # Cost as text with a currency symbol and thousands separators.
+    true_cost = np.round(rng.exponential(180.0, size=n) + 5, 2)
+    true_cost[rng.integers(0, n)] = 98_500.00          # one extreme outlier
+    cost_text = [f"${v:,.2f}" for v in true_cost]
+
+    # Four date formats in one column, as an export from four systems gives.
+    days = rng.integers(0, 400, size=n)
+    starts = pd.to_datetime("2025-01-01") + pd.to_timedelta(days, unit="D")
+    formats = ["%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y", "%Y"]
+    opened = [
+        stamp.strftime(formats[rng.integers(0, len(formats))]) for stamp in starts
+    ]
+
+    satisfaction = rng.integers(1, 6, size=n).astype(float)
+    satisfaction[rng.choice(n, size=int(n * 0.18), replace=False)] = np.nan
+
+    frame = pd.DataFrame({
+        "ticket_id": [f"TK-{100000 + i}" for i in range(n)],
+        "opened_at": opened,
+        "channel": channel,
+        "priority": priority,
+        "resolution_hours": hours_text,
+        "cost": cost_text,
+        "satisfaction": satisfaction,
+        "agent_notes": [
+            f"Customer reported issue {rng.integers(1000, 9999)} and it was handled."
+            for _ in range(n)
+        ],
+        "region_code": ["EMEA"] * n,              # constant
+        "escalation_reason": [None] * n,          # entirely empty
+    })
+
+    # Exact and whitespace-only-different duplicates, appended at the end so
+    # the first occurrence's index is stable.
+    duplicates = frame.iloc[rng.choice(n, size=25, replace=False)].copy()
+    near = frame.iloc[rng.choice(n, size=10, replace=False)].copy()
+    near["channel"] = near["channel"].astype(str) + " "
+    return pd.concat([frame, duplicates, near], ignore_index=True)
+
+
+def clean_reference_for_messy(df: pd.DataFrame) -> pd.DataFrame:
+    """The messy frame with its defects resolved, for computing ground truth.
+
+    Kept beside the generator rather than inside it so a case's expected
+    answer is derived by an explicit, readable transformation that a reader
+    can check by hand — the same reasoning ``eval/ground_truth.py`` gives for
+    computing its answer key independently of the code under test.
+    """
+    out = df.copy()
+    missing = {"", "n/a", "null", "-", "unknown", "nan", "none"}
+
+    hours = out["resolution_hours"].astype(str).str.strip()
+    hours = hours.where(~hours.str.lower().isin(missing))
+    out["resolution_hours"] = pd.to_numeric(
+        hours.str.replace(",", "", regex=False), errors="coerce"
+    )
+
+    out["cost"] = pd.to_numeric(
+        out["cost"].astype(str).str.replace(r"[$,\s]", "", regex=True),
+        errors="coerce",
+    )
+    out["channel"] = out["channel"].astype(str).str.strip().str.lower()
+    out["priority"] = out["priority"].astype(str).str.strip().str.lower()
+    return out

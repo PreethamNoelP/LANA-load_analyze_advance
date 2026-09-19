@@ -1,0 +1,42 @@
+{
+  "current": {
+    "n": 36,
+    "tp": 17,
+    "fp": 0,
+    "fn": 4,
+    "tn": 15,
+    "precision": 1.0,
+    "recall": 0.8095,
+    "f1": 0.8947,
+    "misses": [
+      "adv-13(causal)",
+      "adv-14(causal)",
+      "adv-27(paraphrase)",
+      "adv-31(paraphrase)"
+    ],
+    "false_alarms": []
+  },
+  "baseline": {
+    "n": 36,
+    "tp": 12,
+    "fp": 0,
+    "fn": 9,
+    "tn": 15,
+    "precision": 1.0,
+    "recall": 0.5714,
+    "f1": 0.7273,
+    "misses": [
+      "adv-12(in_range)",
+      "adv-13(causal)",
+      "adv-14(causal)",
+      "adv-21(targeted_statistic)",
+      "adv-23(targeted_statistic)",
+      "adv-25(targeted_statistic)",
+      "adv-27(paraphrase)",
+      "adv-29(targeted_statistic)",
+      "adv-31(paraphrase)"
+    ],
+    "false_alarms": []
+  },
+  "baseline_revision": "HEAD"
+}

@@ -26,8 +26,26 @@ jobs:
         run: python -c "import backend.main"
       - name: Lint
         run: ruff check .
+      # docs/provenance.md states it mirrors VERIFIED_CLAIM_TYPES and
+      # KNOWN_BLIND_SPOTS in app/llm/validation.py. A test asserts the text
+      # matches; this asserts the doc is *regenerable*, so the two cannot drift
+      # through a hand-edit that happens to satisfy the substring check.
+      - name: Check docs mirror the validator
+        run: python -m scripts.regen_provenance --check
       - name: Run tests
         run: pytest tests/ -q --cov=app --cov=backend --cov-report=term-missing
+      # Recomputes the validator's precision and recall against the adversarial
+      # suite. No model, fully deterministic, about a second — so the headline
+      # trust numbers are measured on every push rather than quoted from a
+      # README that was true once.
+      - name: Validator precision/recall
+        run: python -m eval.validator_bench
+      # A concurrency smoke test: 8 clients against every session endpoint,
+      # exiting non-zero on any 5xx. Catches a lock-ordering or shared-state
+      # regression that a serial test suite cannot see, which is exactly the
+      # class of bug the session store's caches could reintroduce.
+      - name: Concurrency smoke test
+        run: python -m eval.load_test --concurrency 8 --requests 5 --rows 5000
 
   frontend:
     runs-on: ubuntu-latest

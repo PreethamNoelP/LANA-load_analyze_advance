@@ -245,4 +245,67 @@ def resolve(df: pd.DataFrame, spec: dict) -> GroundTruth:
         return GroundTruth(kind="multi", value=parts,
                             note="; ".join(p.note for p in parts))
 
+    # ── Messy-dataset ops ────────────────────────────────────────────────────
+    # These resolve against the *cleaned reference* of the messy frame, while
+    # the model is shown the raw one. That asymmetry is the measurement: the
+    # true answer is what the data says once its defects are resolved, and the
+    # question is whether LANA reaches it (or declines) from the mess.
+    #
+    # No cross-check is attached. The production statistics functions cannot
+    # be run on a column pandas has typed as text, which is precisely the
+    # condition under test — asserting agreement between two implementations
+    # of "nothing" would be theatre.
+
+    if op == "messy_column_stat":
+        from .datasets import clean_reference_for_messy
+
+        clean = clean_reference_for_messy(df)
+        values = pd.to_numeric(clean[spec["column"]], errors="coerce").dropna()
+        if values.empty:
+            return GroundTruth(kind="unanswerable",
+                                note=f"'{spec['column']}' has no parseable values")
+        stat = spec["stat"]
+        value = float(getattr(values, stat)())
+        return GroundTruth(
+            kind="numeric", value=value, tolerance=spec.get("tolerance", 0.02),
+            note=f"{stat} of '{spec['column']}' after parsing currency/whitespace "
+                 f"and treating N/A-style tokens as missing",
+        )
+
+    if op == "messy_percent_share":
+        from .datasets import clean_reference_for_messy
+
+        clean = clean_reference_for_messy(df)
+        pct = float((clean[spec["column"]] == spec["value"]).mean() * 100)
+        return GroundTruth(
+            kind="numeric", value=pct, tolerance=spec.get("tolerance", 1.0),
+            tolerance_kind="absolute",
+            note=f"share of '{spec['column']}' == {spec['value']!r} after "
+                 f"normalising case and whitespace (the raw column splits this "
+                 f"category across several spellings)",
+        )
+
+    if op == "messy_null_pct":
+        from .datasets import clean_reference_for_messy
+
+        clean = clean_reference_for_messy(df)
+        pct = float(clean[spec["column"]].isna().mean() * 100)
+        return GroundTruth(
+            kind="numeric", value=pct, tolerance=spec.get("tolerance", 1.0),
+            tolerance_kind="absolute",
+            note=f"missing share of '{spec['column']}' counting '', 'N/A', "
+                 f"'null', '-' and 'unknown' as missing",
+        )
+
+    if op == "messy_mode":
+        from .datasets import clean_reference_for_messy
+
+        clean = clean_reference_for_messy(df)
+        counts = clean[spec["column"]].value_counts()
+        return GroundTruth(
+            kind="categorical", value=str(counts.index[0]),
+            candidates=[str(x) for x in counts.index.tolist()],
+            note=f"most common '{spec['column']}' after normalisation",
+        )
+
     raise ValueError(f"Unknown ground-truth op '{op}'")

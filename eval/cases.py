@@ -1,6 +1,19 @@
 """The labeled question set.
 
-40 questions across two datasets (``eval/datasets.py``), spanning: easy
+Questions across three datasets (``eval/datasets.py``). The first forty span
+two clean, seeded frames; the last ten run against ``messy_support_tickets``,
+which carries the defects a real export actually has — numbers stored as
+text with currency symbols, four date formats in one column, category labels
+that differ only by case and whitespace, five spellings of "missing", exact
+and near-duplicate rows, and an extreme outlier.
+
+That split is deliberate and the reason it exists is worth stating: an
+accuracy figure measured only on clean synthetic data is an accuracy figure
+for the easy case, and reporting it as "accuracy" overclaims. The messy cases
+are scored separately so the gap between the two is visible rather than
+averaged away.
+
+The clean forty span: easy
 aggregation, statistical (robust-centre-aware), group-by, correlation
 (each with one genuine relationship and one negative control), regression,
 questions that cannot be answered from the data at all, questions phrased
@@ -187,4 +200,55 @@ CASES = [
     {"id": "survey-20", "dataset": "survey", "category": "edge_case", "difficulty": "hard",
      "question": "Summarize the exit interview notes for these employees.",
      "gt": {"op": "unanswerable", "note": "exit_interview_notes is entirely empty — every value is missing"}},
+
+    # ── Messy support tickets ────────────────────────────────────────────
+    # LANA sees the *raw* frame; ground truth is computed from the cleaned
+    # reference (``clean_reference_for_messy``). The gap between those two is
+    # the entire point: these measure whether LANA gets the real answer out of
+    # data that does not arrive tidy, or at least declines to invent one.
+
+    {"id": "messy-01", "dataset": "messy", "category": "aggregation", "difficulty": "easy",
+     "question": "How many support tickets are in this dataset?",
+     "gt": {"op": "count_rows"}},
+
+    {"id": "messy-02", "dataset": "messy", "category": "dirty_numeric", "difficulty": "hard",
+     "question": "What is the average resolution time in hours?",
+     "gt": {"op": "messy_column_stat", "column": "resolution_hours", "stat": "mean"}},
+
+    {"id": "messy-03", "dataset": "messy", "category": "dirty_numeric", "difficulty": "hard",
+     "question": "What is the median cost of a ticket?",
+     "gt": {"op": "messy_column_stat", "column": "cost", "stat": "median"}},
+
+    {"id": "messy-04", "dataset": "messy", "category": "dirty_numeric", "difficulty": "hard",
+     "question": "Cost has an extreme outlier — is the mean or the median more "
+                  "representative of a typical ticket, and what is that figure?",
+     "gt": {"op": "messy_column_stat", "column": "cost", "stat": "median"}},
+
+    {"id": "messy-05", "dataset": "messy", "category": "dirty_categorical", "difficulty": "hard",
+     "question": "What percentage of tickets came in through email?",
+     "gt": {"op": "messy_percent_share", "column": "channel", "value": "email"}},
+
+    {"id": "messy-06", "dataset": "messy", "category": "dirty_categorical", "difficulty": "medium",
+     "question": "Which priority level is most common?",
+     "gt": {"op": "messy_mode", "column": "priority"}},
+
+    {"id": "messy-07", "dataset": "messy", "category": "dirty_missing", "difficulty": "hard",
+     "question": "What percentage of tickets are missing a resolution time?",
+     "gt": {"op": "messy_null_pct", "column": "resolution_hours"}},
+
+    {"id": "messy-08", "dataset": "messy", "category": "unanswerable", "difficulty": "hard",
+     "question": "What is the average escalation reason length?",
+     "gt": {"op": "unanswerable",
+             "note": "escalation_reason is entirely empty — there is nothing to average"}},
+
+    {"id": "messy-09", "dataset": "messy", "category": "unanswerable", "difficulty": "hard",
+     "question": "Which region resolves tickets fastest?",
+     "gt": {"op": "unanswerable",
+             "note": "region_code is constant (EMEA) — there is no second region to compare"}},
+
+    {"id": "messy-10", "dataset": "messy", "category": "hallucination_bait", "difficulty": "hard",
+     "question": "What is the average satisfaction score for tickets from the "
+                  "'platinum' support tier?",
+     "gt": {"op": "unanswerable",
+             "note": "no support tier column exists, and 'platinum' is not a value anywhere"}},
 ]

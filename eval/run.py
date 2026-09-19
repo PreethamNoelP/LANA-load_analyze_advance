@@ -37,7 +37,7 @@ from app.llm.ollama_provider import OllamaProvider  # noqa: E402
 from eval.adversarial import build_cases as build_adversarial_cases  # noqa: E402
 from eval.cases import CASES  # noqa: E402
 from eval.compare import load_runs, render_markdown  # noqa: E402
-from eval.datasets import employee_survey, retail_orders  # noqa: E402
+from eval.datasets import employee_survey, messy_support_tickets, retail_orders  # noqa: E402
 from eval.harness import run_adversarial, run_case  # noqa: E402
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -51,13 +51,20 @@ TIMEOUT = 90.0
 NUM_CTX = 8192
 
 
-def main(limit: int | None, models: list[str]) -> None:
-    """Run the suite against each model in turn, then print the comparison.
+def main(limit: int | None, models: list[str], seeds: list[int]) -> None:
+    """Run the suite for each (model, seed) pair, then print the comparison.
 
     Sequentially, not concurrently: a local runtime serves one model at a time,
     and overlapping them would measure contention rather than the models.
+
+    Seeds regenerate the datasets, so the same question is asked of different
+    numbers. That is what separates "this model got 82.5% on this frame" from
+    "this pipeline gets about this much, and here is the spread" — a single
+    seed cannot distinguish a real effect from one convenient draw, and the
+    audit's criticism of the original 40-case, one-model, one-seed figure was
+    exactly that.
     """
-    paths = [run_one(limit, model) for model in models]
+    paths = [run_one(limit, model, seed) for model in models for seed in seeds]
     if len(paths) > 1:
         table = render_markdown(load_runs([str(p) for p in paths]))
         comparison = RESULTS_DIR / f"comparison_{int(time.time())}.md"
@@ -69,7 +76,7 @@ def main(limit: int | None, models: list[str]) -> None:
         print(f"\nComparison table: {comparison}")
 
 
-def run_one(limit: int | None, model: str) -> Path:
+def run_one(limit: int | None, model: str, seed_offset: int = 0) -> Path:
     provider = OllamaProvider(model=model, host=HOST, temperature=TEMPERATURE,
                                max_tokens=MAX_TOKENS, timeout=TIMEOUT, num_ctx=NUM_CTX)
     if not provider.is_available():
@@ -80,8 +87,16 @@ def run_one(limit: int | None, model: str) -> Path:
     print(f"Model under test: {provider.name}")
     print(f"Temperature={TEMPERATURE}  max_tokens={MAX_TOKENS}  num_ctx={NUM_CTX}\n")
 
-    dfs = {"retail": retail_orders(), "survey": employee_survey()}
+    # seed_offset shifts every generator, so a second run sees genuinely
+    # different draws from the same distributions rather than the same frame.
+    dfs = {
+        "retail": retail_orders(seed=20260101 + seed_offset),
+        "survey": employee_survey(seed=20260202 + seed_offset),
+        "messy": messy_support_tickets(seed=20260303 + seed_offset),
+    }
     cases = CASES[:limit] if limit else CASES
+    if seed_offset:
+        print(f"Seed offset: {seed_offset}")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     run_id = int(time.time())
@@ -116,6 +131,7 @@ def run_one(limit: int | None, model: str) -> Path:
     out_path.write_text(json.dumps({
         "run_id": run_id,
         "model": provider.name,
+        "seed_offset": seed_offset,
         "n_cases": len(cases),
         "temperature": TEMPERATURE,
         "main_results": [asdict(r) for r in main_results],
@@ -136,6 +152,26 @@ def summarize(main_results, adv_results) -> dict:
         return round(sum(1 for r in results if r.verdict in verdicts) / len(results), 3) if results else None
 
     summary: dict = {"conditions": {}}
+
+    # Clean and messy datasets are reported separately, never pooled.
+    # Averaging them would produce one number that describes neither: the
+    # clean frames measure statistical correctness, the messy one measures
+    # whether the pipeline survives data that does not arrive tidy, and the
+    # gap between the two is the honest headline.
+    by_dataset = defaultdict(list)
+    for r in main_results:
+        if r.condition == "lana":
+            by_dataset["messy" if r.dataset == "messy" else "clean"].append(r)
+    summary["lana_by_data_quality"] = {
+        kind: {
+            "n": len(results),
+            "correct_rate": rate(results, {"correct"}),
+            "hallucinated_rate": rate(results, {"hallucinated"}),
+            "by_verdict": _counts(r.verdict for r in results),
+        }
+        for kind, results in sorted(by_dataset.items())
+    }
+
     for cond, results in by_condition.items():
         summary["conditions"][cond] = {
             "n": len(results),
@@ -236,9 +272,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N cases (smoke test).")
     parser.add_argument(
+        "--seeds", default="0",
+        help=("Comma-separated seed offsets. Each regenerates the datasets, so "
+              "the same questions are asked of different draws. Use several to "
+              "report a spread rather than a single number, e.g. --seeds 0,1,2."),
+    )
+    parser.add_argument(
         "--models", default=MODEL,
         help=("Comma-separated Ollama model tags, run in turn and compared "
               f"(default: {MODEL}). Each must already be pulled."),
     )
     args = parser.parse_args()
-    main(limit=args.limit, models=[m.strip() for m in args.models.split(",") if m.strip()])
+    main(
+        limit=args.limit,
+        models=[m.strip() for m in args.models.split(",") if m.strip()],
+        seeds=[int(s.strip()) for s in args.seeds.split(",") if s.strip()],
+    )

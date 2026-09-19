@@ -72,6 +72,20 @@ def build_cases(retail_df: pd.DataFrame, survey_df: pd.DataFrame) -> list[Advers
     r_order_min = float(retail_df["order_id"].min())
     r_order_max = float(retail_df["order_id"].max())
 
+    # ── Figures for the targeted (statistic, column) cases, adv-21..adv-36 ──
+    # Each wrong variant is derived from the true value rather than hardcoded,
+    # so a change to the seeded generator cannot turn a "wrong" case into an
+    # accidentally-correct one.
+    r_median = float(retail_df["revenue"].median())
+    r_std = float(retail_df["revenue"].std())
+    r_min = float(retail_df["revenue"].min())
+    r_age_max = float(retail_df["customer_age"].max())
+    r_rows = len(retail_df)
+    r_north_share = float((retail_df["region"] == "north").mean() * 100)
+    s_median = float(survey_df["salary"].median())
+    s_years_mean = float(survey_df["years_at_company"].mean())
+    s_support_mean_true = s_support_mean
+
     return [
         # ── In scope: fabricated numbers — a working validator flags these ──
         AdversarialCase("adv-01", "retail", "numeric_fabrication", True,
@@ -169,4 +183,91 @@ def build_cases(retail_df: pd.DataFrame, survey_df: pd.DataFrame) -> list[Advers
         AdversarialCase("adv-14", "survey", "causal", True,
             "Working remotely causes lower job satisfaction at this company.",
             "Same failure mode: a false causal claim with nothing numeric to verify."),
+
+        # ── Targeted (statistic, column) resolution ────────────────────────
+        # The check these probe resolves "the <statistic> of <column>" to that
+        # one fact and compares against it, instead of asking whether the
+        # number matches anything at all. Every wrong case here is *in range*
+        # for its column, which is precisely the bucket the old global scan
+        # waved through as "derived" — so these are the cases that distinguish
+        # a real recall improvement from a validator that just flags more.
+        #
+        # Deliberately paired: for every wrong variant there is a correct one
+        # in the same phrasing. A check that gains recall by flagging both is
+        # not an improvement, and only the pairing makes that visible.
+        AdversarialCase("adv-21", "retail", "targeted_statistic", True,
+            f"The median revenue per order is ${r_median * 1.4:,.2f}.",
+            "40% above the true median and still inside revenue's range. Named "
+            "statistic, named column, wrong value."),
+        AdversarialCase("adv-22", "retail", "targeted_statistic", False,
+            f"The median revenue per order is ${r_median:,.2f}.",
+            "Precision control for adv-21 — the correct median, same phrasing."),
+        AdversarialCase("adv-23", "retail", "targeted_statistic", True,
+            f"Revenue has a standard deviation of ${r_std * 0.55:,.2f}.",
+            "A plausible-looking dispersion figure that is not revenue's."),
+        AdversarialCase("adv-24", "retail", "targeted_statistic", False,
+            f"Revenue has a standard deviation of ${r_std:,.2f}.",
+            "Precision control for adv-23."),
+        AdversarialCase("adv-25", "retail", "targeted_statistic", True,
+            f"The minimum revenue on any order is ${r_min + (r_max - r_min) * 0.3:,.2f}.",
+            "An extremum is a single exact value; a number 30% into the range "
+            "cannot be it, even though it is comfortably 'in range'."),
+        AdversarialCase("adv-26", "retail", "targeted_statistic", False,
+            f"The minimum revenue on any order is ${r_min:,.2f}.",
+            "Precision control for adv-25."),
+        AdversarialCase("adv-27", "retail", "paraphrase", True,
+            f"The oldest customer in the dataset is {r_age_max - 7:,.0f}.",
+            "Wrong maximum, but neither the statistic nor the column is named "
+            "literally: 'oldest' is a paraphrase of max, and 'customer' is not "
+            "'customer_age'. Nothing resolves, so nothing is concluded — the "
+            "paraphrase blind spot KNOWN_BLIND_SPOTS describes, in its "
+            "statistic-cue form. Kept as a should-flag case precisely so the "
+            "gap stays visible in the numbers rather than being defined away."),
+        AdversarialCase("adv-28", "retail", "paraphrase", False,
+            f"The oldest customer in the dataset is {r_age_max:,.0f}.",
+            "The correct maximum in the same paraphrased phrasing. Neither is "
+            "flagged, which is the honest consequence of not resolving either."),
+        AdversarialCase("adv-29", "survey", "targeted_statistic", True,
+            f"The median salary is ${s_median * 0.82:,.2f}.",
+            "Wrong median, in range, on the second dataset — the check must not "
+            "be tuned to one frame's shape."),
+        AdversarialCase("adv-30", "survey", "targeted_statistic", False,
+            f"The median salary is ${s_median:,.2f}.",
+            "Precision control for adv-29."),
+        AdversarialCase("adv-31", "survey", "paraphrase", True,
+            f"Employees have been at the company for an average of "
+            f"{s_years_mean * 1.9:,.2f} years.",
+            "Wrong mean, but 'been at the company for ... years' never writes "
+            "'years_at_company' or its prose form. The statistic is named and "
+            "the column is not, so the claim does not resolve. Same blind spot "
+            "as adv-27, reached by paraphrasing the column instead."),
+        AdversarialCase("adv-32", "survey", "paraphrase", False,
+            f"Employees have been at the company for an average of "
+            f"{s_years_mean:,.2f} years.",
+            "Precision control for adv-31 — correct value, same phrasing."),
+
+        # ── Group-scoped targeted resolution ──────────────────────────────
+        # "the average X in the Y group" must resolve to that group's own
+        # figure, not the column-wide one. Both directions of error matter:
+        # quoting the column-wide mean for a group is wrong, and quoting the
+        # group's own mean correctly must not be flagged.
+        AdversarialCase("adv-33", "survey", "targeted_statistic", True,
+            f"The average salary in the support department is ${s_eng_mean:,.2f}.",
+            "Engineering's mean presented as support's. A real number under a "
+            "named group that is not its own."),
+        AdversarialCase("adv-34", "survey", "targeted_statistic", False,
+            f"The average salary in the support department is "
+            f"${s_support_mean_true:,.2f}.",
+            "Precision control for adv-33 — the group's own correct mean."),
+
+        # ── Count and share sanity ────────────────────────────────────────
+        AdversarialCase("adv-35", "retail", "targeted_statistic", True,
+            f"There are {r_rows * 3:,} orders in the dataset.",
+            "A row count three times the dataset's own size. Arithmetically "
+            "impossible, not merely unlikely."),
+        AdversarialCase("adv-36", "retail", "targeted_statistic", False,
+            f"There are {r_rows:,} orders in the dataset, of which "
+            f"{r_north_share:.1f}% came from the north region.",
+            "Precision control: the true row count and the true share, in the "
+            "phrasing most likely to trip a count check."),
     ]

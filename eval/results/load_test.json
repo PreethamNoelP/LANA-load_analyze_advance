@@ -1,0 +1,175 @@
+{
+  "load": {
+    "mode": "in-process (ASGI, no network)",
+    "concurrency": 16,
+    "dataset_rows": 20000,
+    "uploads": {
+      "name": "POST /upload",
+      "n": 16,
+      "ok": 16,
+      "errors": 0,
+      "statuses": {
+        "200": 16
+      },
+      "p50_ms": 1031.6,
+      "p95_ms": 1061.7,
+      "p99_ms": 1064.9,
+      "max_ms": 1064.9,
+      "mean_ms": 1031.9
+    },
+    "endpoints": [
+      {
+        "name": "GET /session",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 72.3,
+        "p95_ms": 243.3,
+        "p99_ms": 308.7,
+        "max_ms": 308.7,
+        "mean_ms": 109.1
+      },
+      {
+        "name": "GET /profile",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 82.6,
+        "p95_ms": 213.1,
+        "p99_ms": 284.7,
+        "max_ms": 284.7,
+        "mean_ms": 95.1
+      },
+      {
+        "name": "GET /correlation",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 137.2,
+        "p95_ms": 265.9,
+        "p99_ms": 467.2,
+        "max_ms": 467.2,
+        "mean_ms": 139.0
+      },
+      {
+        "name": "GET /recommendations",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 130.0,
+        "p95_ms": 212.3,
+        "p99_ms": 416.7,
+        "max_ms": 416.7,
+        "mean_ms": 130.3
+      },
+      {
+        "name": "GET /stats",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 248.1,
+        "p95_ms": 657.9,
+        "p99_ms": 833.7,
+        "max_ms": 833.7,
+        "mean_ms": 287.5
+      },
+      {
+        "name": "POST /chart",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 5745.4,
+        "p95_ms": 7033.7,
+        "p99_ms": 7107.2,
+        "max_ms": 7107.2,
+        "mean_ms": 5257.3
+      },
+      {
+        "name": "GET /clean/preview",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 531.1,
+        "p95_ms": 1384.9,
+        "p99_ms": 1589.5,
+        "max_ms": 1589.5,
+        "mean_ms": 682.9
+      },
+      {
+        "name": "GET /export/csv",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 208.2,
+        "p95_ms": 566.7,
+        "p99_ms": 753.3,
+        "max_ms": 753.3,
+        "mean_ms": 275.8
+      },
+      {
+        "name": "GET /health",
+        "n": 20,
+        "ok": 20,
+        "errors": 0,
+        "statuses": {
+          "200": 20
+        },
+        "p50_ms": 77.0,
+        "p95_ms": 304.6,
+        "p99_ms": 8940.3,
+        "max_ms": 8940.3,
+        "mean_ms": 533.7
+      }
+    ],
+    "totals": {
+      "requests": 196,
+      "wall_seconds": 11.2,
+      "throughput_rps": 17.5,
+      "errors": 0
+    },
+    "memory": {
+      "measures": "the LANA server process (same process as this benchmark)",
+      "server_process": true,
+      "rss_start_mb": 263.8,
+      "rss_after_uploads_mb": 309.9,
+      "rss_end_mb": 407.2,
+      "growth_mb": 143.3,
+      "sessions_created": 16
+    }
+  },
+  "admission": {
+    "host_limit_mb": 671,
+    "probe_limit_mb": 1,
+    "limit_forced_for_probe": true,
+    "offered_bytes": 1200006,
+    "status": 413,
+    "refused": true,
+    "refused_cleanly": true,
+    "detail": "File exceeds the 1 MB limit. This machine has 6,407 MB free, and parsing needs several times a file's size in memory. Set LANA_MAX_UPLOAD_MB to override.",
+    "process_alive": true
+  }
+}
