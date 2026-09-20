@@ -51,6 +51,7 @@ sqlalchemy==2.0.51       # SQL databases. The engine's own driver is separate:
                           #   SQLite     -> built in
 pymongo==4.18.1          # MongoDB collections
 httpx==0.28.1            # REST / URL sources (also used by the OpenAI SDK)
+cryptography==50.0.0   # optional: AES-256-GCM for persisted sessions (LANA_ENCRYPTION_KEY)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 python-dotenv==1.2.2

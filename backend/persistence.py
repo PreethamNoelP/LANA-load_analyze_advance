@@ -14,6 +14,7 @@ correct in-memory result regardless of whether the write to disk succeeds.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import shutil
@@ -24,6 +25,7 @@ from typing import Any
 
 import pandas as pd
 
+from app import crypto
 from app.data.lineage import CleaningLedger
 
 logger = logging.getLogger("lana")
@@ -56,6 +58,13 @@ class PersistenceBackend:
     Parquet, not CSV, because it round-trips dtypes exactly — a column LANA
     parsed as datetime or category must not come back as a string after a
     restart.
+
+    With ``LANA_ENCRYPTION_KEY`` set, every frame is encrypted with AES-256-GCM
+    before it touches the disk, so a stolen volume or a leaked backup yields
+    nothing. The frames are serialised to bytes in memory rather than written
+    through pandas' own path, because encryption has to happen before the
+    bytes land — writing plaintext and encrypting afterwards would leave the
+    plaintext recoverable from the filesystem.
     """
 
     def __init__(self, data_dir: Path) -> None:
@@ -96,15 +105,18 @@ class PersistenceBackend:
             with self._lock:
                 sdir = self._session_dir(session.session_id)
                 if frames:
-                    session.raw.to_parquet(sdir / "raw.parquet")
+                    _write_frame(session.raw, sdir / "raw.parquet")
                     cleaned_path = sdir / "cleaned.parquet"
                     ledger_path = sdir / "ledger.json"
                     if session.cleaned is not None:
-                        session.cleaned.to_parquet(cleaned_path)
-                        ledger_path.write_text(
-                            json.dumps(session.ledger.to_persisted_dict())
-                            if session.ledger is not None else "{}",
-                            encoding="utf-8",
+                        _write_frame(session.cleaned, cleaned_path)
+                        # The ledger names columns and describes what was done
+                        # to them, so it is data about the data and gets the
+                        # same treatment as the frames.
+                        _write_bytes(
+                            (json.dumps(session.ledger.to_persisted_dict())
+                             if session.ledger is not None else "{}").encode("utf-8"),
+                            ledger_path,
                         )
                     else:
                         cleaned_path.unlink(missing_ok=True)
@@ -171,16 +183,16 @@ class PersistenceBackend:
                 self.delete(sid)
                 continue
             try:
-                raw = pd.read_parquet(raw_path)
+                raw = _read_frame(raw_path)
                 cleaned = None
                 ledger = None
                 cleaned_path = sdir / "cleaned.parquet"
                 if cleaned_path.exists():
-                    cleaned = pd.read_parquet(cleaned_path)
+                    cleaned = _read_frame(cleaned_path)
                     ledger_path = sdir / "ledger.json"
                     if ledger_path.exists():
                         ledger = CleaningLedger.from_persisted_dict(
-                            json.loads(ledger_path.read_text(encoding="utf-8"))
+                            json.loads(_read_bytes(ledger_path).decode("utf-8"))
                         )
             except Exception:
                 logger.warning("Skipping unreadable persisted session %s", sid, exc_info=True)
@@ -230,16 +242,16 @@ class PersistenceBackend:
             self.delete(session_id)
             return None
         try:
-            raw = pd.read_parquet(raw_path)
+            raw = _read_frame(raw_path)
             cleaned = None
             ledger = None
             cleaned_path = sdir / "cleaned.parquet"
             if cleaned_path.exists():
-                cleaned = pd.read_parquet(cleaned_path)
+                cleaned = _read_frame(cleaned_path)
                 ledger_path = sdir / "ledger.json"
                 if ledger_path.exists():
                     ledger = CleaningLedger.from_persisted_dict(
-                        json.loads(ledger_path.read_text(encoding="utf-8"))
+                        json.loads(_read_bytes(ledger_path).decode("utf-8"))
                     )
         except Exception:
             logger.warning("Persisted session %s is unreadable", session_id, exc_info=True)
@@ -256,6 +268,40 @@ class PersistenceBackend:
             "last_used": row["last_used"],
             "owner": _row_owner(row),
         }
+
+
+def _write_bytes(payload: bytes, path: Path) -> None:
+    """Write, encrypting first when a key is configured."""
+    path.write_bytes(crypto.encrypt(payload) if crypto.encryption_enabled()
+                     else payload)
+
+
+def _read_bytes(path: Path) -> bytes:
+    """Read, decrypting when the file carries LANA's header.
+
+    ``decrypt`` passes plaintext through unchanged, so a data directory
+    written before encryption was switched on still opens — switching it on
+    needs no migration step, and new writes are encrypted from then on.
+    """
+    return crypto.decrypt(path.read_bytes())
+
+
+def _write_frame(frame: pd.DataFrame, path: Path) -> None:
+    """Serialise a frame to Parquet bytes, then write them.
+
+    Through a buffer rather than ``to_parquet(path)`` so that encryption
+    happens before anything reaches the filesystem. Writing plaintext and
+    encrypting it afterwards would leave the original recoverable from free
+    space, which defeats the purpose on exactly the disk-theft case this is
+    for.
+    """
+    buffer = io.BytesIO()
+    frame.to_parquet(buffer)
+    _write_bytes(buffer.getvalue(), path)
+
+
+def _read_frame(path: Path) -> pd.DataFrame:
+    return pd.read_parquet(io.BytesIO(_read_bytes(path)))
 
 
 def _row_owner(row: Any) -> str:
