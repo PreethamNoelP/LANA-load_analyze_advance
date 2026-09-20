@@ -1,21 +1,28 @@
 /* Sign-in, for the case where LANA is running somewhere shared.
  *
  * Renders nothing at all in the default single-user setup: the backend
- * reports `required: false`, and this component gets out of the way before
- * anything is drawn. It exists only because LANA_AUTH_TOKEN is now exchanged
- * for a cookie at runtime instead of being compiled into the bundle — which
- * is what made it safe, and which also means something has to ask for it once.
+ * reports `mode: "open"`, and this component gets out of the way before
+ * anything is drawn.
  *
- * Deliberately not a login form: there is one shared token and no concept of
- * a user, and calling it "Password" would imply an account system that does
- * not exist. SECURITY.md says the same thing in the same words.
+ * There are two other modes, and which form to show is read from the server
+ * rather than guessed — a client that assumed would show the wrong one:
+ *
+ *   accounts — a real username and password, one identity per person. This is
+ *              what makes session ownership mean something between two
+ *              colleagues rather than between two holders of the same secret.
+ *   token    — the older single shared secret. Kept working because instances
+ *              are running on it. Deliberately not labelled "password": there
+ *              is no account behind it and saying so would imply one.
  */
 
 import { useEffect, useState } from 'react'
-import { getAuthStatus, openAuthSession } from '../api.js'
+import { getAuthStatus, login, openAuthSession } from '../api.js'
 
 export default function AuthGate({ children }) {
   const [state, setState] = useState('checking')   // checking | needed | open | unreachable
+  const [mode, setMode] = useState('open')         // open | accounts | token
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [token, setToken] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -25,6 +32,7 @@ export default function AuthGate({ children }) {
     getAuthStatus()
       .then(status => {
         if (cancelled) return
+        setMode(status.mode || (status.required ? 'token' : 'open'))
         // `authenticated` is already true when a valid cookie survived a
         // reload, so a returning user is not asked again.
         setState(!status.required || status.authenticated ? 'open' : 'needed')
@@ -38,10 +46,15 @@ export default function AuthGate({ children }) {
     setSubmitting(true)
     setError(null)
     try {
-      await openAuthSession(token)
+      if (mode === 'accounts') {
+        await login(username, password)
+      } else {
+        await openAuthSession(token)
+      }
       setState('open')
-      // Cleared immediately: there is no reason for the secret to stay in
+      // Cleared immediately: there is no reason for a credential to stay in
       // component state once the cookie exists.
+      setPassword('')
       setToken('')
     } catch (e) {
       setError(e.message)
@@ -67,6 +80,51 @@ export default function AuthGate({ children }) {
     )
   }
 
+  if (mode === 'accounts') {
+    return (
+      <div style={s.wrap}>
+        <form style={s.card} onSubmit={submit}>
+          <h1 style={s.title}>Sign in to LANA</h1>
+          <p style={s.body}>
+            Your datasets are yours: another account on this instance cannot
+            open them.
+          </p>
+          <input
+            style={s.input}
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            placeholder="Username"
+            aria-label="Username"
+            autoFocus
+            autoComplete="username"
+          />
+          <input
+            style={s.input}
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="Password"
+            aria-label="Password"
+            autoComplete="current-password"
+          />
+          {error && <div style={s.error}>{error}</div>}
+          <button
+            style={s.button}
+            type="submit"
+            disabled={!username || !password || submitting}
+          >
+            {submitting ? 'Signing in…' : 'Sign in'}
+          </button>
+          <p style={s.note}>
+            Accounts are created by whoever runs this instance, with{' '}
+            <code style={s.code}>python -m scripts.manage_users add</code>.
+            There is no sign-up.
+          </p>
+        </form>
+      </div>
+    )
+  }
+
   return (
     <div style={s.wrap}>
       <form style={s.card} onSubmit={submit}>
@@ -82,6 +140,7 @@ export default function AuthGate({ children }) {
           value={token}
           onChange={e => setToken(e.target.value)}
           placeholder="Access token"
+          aria-label="Access token"
           autoFocus
           autoComplete="off"
         />
@@ -91,7 +150,9 @@ export default function AuthGate({ children }) {
         </button>
         <p style={s.note}>
           One token for the whole instance, not a personal account. Everyone
-          holding it has the same level of access.
+          holding it has the same level of access — set up accounts
+          (<code style={s.code}>LANA_ACCOUNTS=true</code>) if people here
+          should not see each other's data.
         </p>
       </form>
     </div>

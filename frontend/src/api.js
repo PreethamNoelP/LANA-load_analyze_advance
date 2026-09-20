@@ -291,6 +291,22 @@ export async function openAuthSession(token) {
   return ok(res)
 }
 
+// Accounts mode: a real username and password, checked server-side against a
+// per-user scrypt hash. The reply sets a session cookie this code cannot read
+// and the server can revoke — unlike a stateless token, which stays valid
+// until it expires no matter what the server has since learned.
+export async function login(username, password) {
+  const res = await request('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  if (res.status === 401) {
+    throw new ApiError('That username and password did not match.', { status: 401 })
+  }
+  return ok(res)
+}
+
 export async function closeAuthSession() {
   return ok(await request('/auth/logout', { method: 'POST' }))
 }
