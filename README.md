@@ -82,6 +82,8 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 | ⚙️ **Adapts to Your Machine** | Upload and session-memory limits are derived from the host's actual RAM at startup, not a flat constant — the same build works on an 8 GB laptop and a 64 GB workstation. Check what it chose at `GET /health`. |
 | 🔒 **100% Local & Private** | No cloud API. No telemetry. No data leaves your machine — and a URL source refuses private, loopback and cloud-metadata addresses so "fetch this URL" cannot be turned into a request forgery against your own network. |
 | 📈 **Production Observability** | Structured JSON logs with a request id on every record, and Prometheus metrics at `GET /metrics` covering request rate, latency histograms, LLM path and outcome, SQL query outcomes, validation verdicts by provenance, and resident sessions. Counts and latencies only — never a column name, a value or a filename. |
+| 👤 **Per-user accounts** | Real sign-in, so your datasets are yours: another account on the same instance cannot open them. scrypt password hashing, server-side revocable sessions, admin-created users (no sign-up page — open registration on an analysis tool means the first stranger to find the port becomes a user). Turn on with `LANA_ACCOUNTS=true`; the single-user default is unchanged. |
+| 🔒 **Encryption at rest (optional)** | `LANA_ENCRYPTION_KEY` encrypts persisted datasets with AES-256-GCM — a stolen disk or a leaked backup yields nothing. Stated plainly: it does not protect against anyone who can read the running process, because the key is there. |
 | 🧾 **Auditable** | Data loaded, cleaned, version-switched, questioned and exported — plus refused access and failed sign-ins — are appended to a durable `audit.jsonl` carrying the principal, request id and session. Never cell values, column names or the token: an audit trail that copies the data it audits is a second, less protected copy of that data. Read your own at `GET /audit`. |
 | 🧵 **Safe Under Concurrency** | Per-caller rate limiting, per-session ownership, and an LLM concurrency cap that is enforced *across* uvicorn workers rather than once per worker. Measured: 16 concurrent clients, 196 requests, zero 5xx (`python -m eval.load_test`). |
 | 🎨 **Production UI** | Dark-theme React SPA with a ChatGPT-style chat interface, sessions that survive a page refresh, and confirmation before anything destructive. |
@@ -108,6 +110,7 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 │                                                                       │
 │  GET  /health          →  host RAM/CPU + derived limits + LLM status  │
 │  GET  /metrics         →  Prometheus: rates, latencies, verdicts       │
+│  POST /auth/login      →  username + password → revocable session cookie│
 │  POST /auth/session    →  trade the shared token for an HttpOnly cookie│
 │                                                                       │
 │  GET  /sources         →  connectors available in this build           │
@@ -420,6 +423,17 @@ Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 > app, not a login system — anyone holding it has full access. The upload
 > and request-size limits are there to keep a mistake from taking the
 > machine down; they are not a substitute for access control either way.
+>
+> Better still, use accounts rather than one shared secret:
+>
+> ```
+> python -m scripts.manage_users add alice     # first account is an admin
+> LANA_ACCOUNTS=true uvicorn backend.main:app
+> ```
+>
+> Then each person is a separate identity and cannot open anyone else's
+> datasets. The token mode above is kept for instances already using it, not
+> because it is equivalent.
 >
 > Setting the token also changes one default on purpose: the `file` connector,
 > which reads a path on the *server's* disk, switches itself off until
