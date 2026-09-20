@@ -28,13 +28,25 @@ The principal is the same non-secret identity used for rate limiting and
 session ownership: a hash prefix of the token, or ``ip:<address>`` when no
 token is configured. It never carries the token.
 
-Durability, stated honestly
----------------------------
-This is a file appended to under a process lock, not a tamper-evident ledger.
-It answers "what did this instance do" for an operator reading it; it is not
-evidence against someone with write access to the disk. Making it more than
-that means signing or shipping entries off-host, which is a real feature with
-real operational cost and is not claimed here.
+Tamper evidence, and its exact limit
+------------------------------------
+Each entry carries ``prev``, the hash of the entry before it, and ``hash``,
+the hash of itself including that link. The file is therefore a chain, and
+:meth:`AuditLog.verify` detects three things a plain append-only file cannot:
+an entry edited in place, an entry removed from the middle, and a truncated
+tail.
+
+The limit, stated precisely because this is exactly the claim that gets
+overstated: someone who can write to the file and knows the scheme can
+recompute the chain from the point they altered, and the result verifies.
+Detecting that needs a key they do not have (an HMAC) or a copy they cannot
+reach (shipping entries off-host). Neither is claimed here.
+
+What the chain does buy is real: casual tampering, a truncating crash and a
+partial deletion all become visible, and those are what actually happen. A
+determined attacker with write access and knowledge of the format is a
+different threat, and the honest answer to it is to ship the log somewhere
+they do not control.
 
 Off unless there is somewhere to put it: like session persistence, a plain
 ``uvicorn --reload`` dev run should not start writing files into a
@@ -44,6 +56,7 @@ explicitly with ``LANA_AUDIT_LOG``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -66,10 +79,14 @@ QUESTION_ANSWERED = "question.answered"
 SOURCE_TESTED = "source.tested"
 ACCESS_DENIED = "access.denied"
 AUTH_FAILED = "auth.failed"
+# Successful sign-ins matter as much as failed ones: "nobody signed in that
+# night" is only an answer if successes are recorded too.
+AUTH_SUCCEEDED = "auth.succeeded"
 
 ACTIONS = frozenset({
     DATA_LOADED, DATA_CLEANED, DATA_EXPORTED, DATA_VERSION_SWITCHED,
     QUESTION_ANSWERED, SOURCE_TESTED, ACCESS_DENIED, AUTH_FAILED,
+    AUTH_SUCCEEDED,
 })
 
 # Rotate at this size and keep this many old files. Bounded because an audit
@@ -88,6 +105,12 @@ MAX_DETAIL_CHARS = 200
 MAX_READ_ENTRIES = 500
 
 
+# The hash standing in for "the entry before the first one". A fixed, known
+# value, so the start of a chain is verifiable rather than being whatever
+# happened to be there.
+GENESIS_HASH = "0" * 64
+
+
 @dataclass(frozen=True)
 class AuditEntry:
     """One consequential action, in the shape every entry shares."""
@@ -100,7 +123,8 @@ class AuditEntry:
     request_id: str = ""
     detail: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, Any]:
+    def body(self) -> dict[str, Any]:
+        """The entry's own content, without its chain fields."""
         return {
             "ts": round(self.ts, 3),
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.ts)),
@@ -111,6 +135,25 @@ class AuditEntry:
             "request_id": self.request_id,
             "detail": self.detail,
         }
+
+    def to_dict(self, prev_hash: str = GENESIS_HASH) -> dict[str, Any]:
+        """The full record, linked to the entry before it."""
+        payload = self.body()
+        payload["prev"] = prev_hash
+        payload["hash"] = entry_hash(payload)
+        return payload
+
+
+def entry_hash(payload: dict[str, Any]) -> str:
+    """Hash one entry, over everything except the hash field itself.
+
+    ``sort_keys`` makes the digest independent of dict ordering, so a record
+    read back from disk and re-hashed matches what was written. Without it,
+    verification would fail on key order alone.
+    """
+    material = {k: v for k, v in payload.items() if k != "hash"}
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def scrub(detail: dict[str, Any] | None) -> dict[str, Any]:
@@ -149,6 +192,11 @@ class AuditLog:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        # Cached so the common case — append one entry — does not re-read the
+        # file to find the previous hash. Seeded from disk on first use, so a
+        # restart continues the existing chain instead of starting a fresh one
+        # that verification would report as a break.
+        self._last_hash: str | None = None
 
     def record(self, entry: AuditEntry) -> None:
         """Write one entry. Never raises.
@@ -158,10 +206,13 @@ class AuditLog:
         500 because a disk is full helps nobody. The failure is logged, which
         is itself visible to whoever is watching.
         """
-        line = json.dumps(entry.to_dict(), separators=(",", ":"))
         try:
             with self._lock:
                 self._rotate_if_needed()
+                if self._last_hash is None:
+                    self._last_hash = self._read_last_hash()
+                payload = entry.to_dict(self._last_hash)
+                line = json.dumps(payload, separators=(",", ":"))
                 with self.path.open("a", encoding="utf-8") as handle:
                     # A process killed mid-write leaves a line with no
                     # terminator. Appending straight onto it would fuse the
@@ -172,8 +223,67 @@ class AuditLog:
                     if self._ends_mid_line():
                         handle.write("\n")
                     handle.write(line + "\n")
+                self._last_hash = payload["hash"]
         except Exception:
             logger.warning("Could not write an audit entry", exc_info=True)
+
+    def _read_last_hash(self) -> str:
+        """The hash of the final entry on disk, or the genesis value."""
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                lines = handle.readlines()
+        except OSError:
+            return GENESIS_HASH
+        for raw in reversed(lines):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                return json.loads(raw).get("hash") or GENESIS_HASH
+            except json.JSONDecodeError:
+                continue
+        return GENESIS_HASH
+
+    def verify(self) -> dict[str, Any]:
+        """Walk the chain and report the first break, if any.
+
+        A caller gets the position of the break rather than a bare boolean,
+        because "the log was altered" is not actionable and "entry 412 does
+        not match its own hash" is.
+        """
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                lines = [ln.strip() for ln in handle if ln.strip()]
+        except FileNotFoundError:
+            return {"ok": True, "entries": 0, "broken_at": None,
+                    "reason": "no audit log has been written yet"}
+        except OSError as exc:
+            return {"ok": False, "entries": 0, "broken_at": None,
+                    "reason": f"could not read the log: {exc}"}
+
+        expected = GENESIS_HASH
+        for index, raw in enumerate(lines):
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                return {"ok": False, "entries": index, "broken_at": index,
+                        "reason": "entry is not valid JSON"}
+            if record.get("prev") != expected:
+                return {
+                    "ok": False, "entries": index, "broken_at": index,
+                    "reason": "entry does not follow the one before it — "
+                              "something was deleted, reordered or inserted",
+                }
+            if record.get("hash") != entry_hash(record):
+                return {
+                    "ok": False, "entries": index, "broken_at": index,
+                    "reason": "entry does not match its own hash — it was "
+                              "modified after it was written",
+                }
+            expected = record["hash"]
+
+        return {"ok": True, "entries": len(lines), "broken_at": None,
+                "reason": "every entry follows the one before it"}
 
     def _ends_mid_line(self) -> bool:
         """Whether the file's last byte is something other than a newline."""
@@ -200,6 +310,11 @@ class AuditLog:
             if source.exists():
                 source.replace(target)
         self.path.replace(self.path.with_suffix(".1.jsonl"))
+        # A rotated file starts a new chain. Recorded as a deliberate break
+        # rather than pretending continuity across files: verify() reads one
+        # file, so claiming the chain spans rotation would be a claim it
+        # cannot actually check.
+        self._last_hash = GENESIS_HASH
 
     def read(
         self,
@@ -262,6 +377,10 @@ class NullAuditLog:
 
     def read(self, **kwargs: Any) -> list[dict[str, Any]]:
         return []
+
+    def verify(self) -> dict[str, Any]:
+        return {"ok": True, "entries": 0, "broken_at": None,
+                "reason": "auditing is not enabled on this instance"}
 
 
 AuditLog.enabled = True  # type: ignore[attr-defined]

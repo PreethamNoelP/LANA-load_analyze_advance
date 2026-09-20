@@ -280,7 +280,13 @@ def test_health_reports_real_llm_availability(client, monkeypatch):
 
     monkeypatch.setattr(backend_main, "get_provider", lambda: _Up())
     body = client.get("/health").json()
-    assert body["llm"] == {"available": True, "name": "Fake - test-model"}
+    assert body["llm"]["available"] is True
+    assert body["llm"]["name"] == "Fake - test-model"
+    # Whether the model runs on this machine. "No data leaves your machine"
+    # is LANA's headline claim and stops being true the moment someone points
+    # LLM_PROVIDER at a hosted endpoint, so it is reported rather than left to
+    # be inferred from a provider name.
+    assert body["llm"]["local"] is True
 
 
 def test_health_reports_llm_unavailable_without_raising(client, monkeypatch):

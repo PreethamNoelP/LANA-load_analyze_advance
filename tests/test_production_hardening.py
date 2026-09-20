@@ -59,7 +59,13 @@ def test_no_auth_by_default_leaves_everything_open(client, monkeypatch):
 
 def test_auth_status_reports_whether_a_token_is_required(client, auth_on):
     body = client.get("/auth/status").json()
-    assert body == {"required": True, "authenticated": False}
+    assert body["required"] is True
+    assert body["authenticated"] is False
+    # Named explicitly since accounts mode exists: the sign-in form differs
+    # per mode, so a client that guessed would render the wrong one.
+    assert body["mode"] == "token"
+    # No account behind a shared token, and saying otherwise would imply one.
+    assert body["user"] is None
 
 
 def test_a_bad_token_is_refused_at_the_exchange(client, auth_on):

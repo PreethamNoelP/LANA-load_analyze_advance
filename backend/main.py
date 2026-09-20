@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app import accounts as accounts_mod
 from app import audit as audit_mod
 from app import observability as obs
 from app.analysis.regression import perform_linear_regression
@@ -40,6 +41,7 @@ from app.data.cleaner import apply_cleaning, detect_issues
 from app.data.profile import dataset_quality
 from app.llm import get_provider
 from app.llm.context import build_context
+from app.llm.injection import scan_frame
 from app.llm.sql_answer import SqlPlanningFailed, answer_with_sql
 from app.llm.validation import capability_summary, validate_answer
 from app.resources import HOST, UPLOAD_PEAK_MULTIPLIER, can_admit
@@ -87,7 +89,15 @@ app.add_middleware(
 # able to ask "is a token required here?" before it can possibly have one.
 # It reveals only whether auth is switched on, which is observable anyway from
 # the 401 any other endpoint returns.
-_AUTH_EXEMPT_PATHS = {"/health", "/metrics", "/auth/session", "/auth/status"}
+# /auth/login and /auth/logout are exempt for the same chicken-and-egg reason
+# as /auth/status: a caller cannot present a credential to the endpoint whose
+# job is to issue one. Logout is exempt so a browser holding a stale or
+# revoked cookie can still clear it rather than being stuck with a credential
+# the server no longer honours and no way to drop it.
+_AUTH_EXEMPT_PATHS = {
+    "/health", "/metrics", "/auth/session", "/auth/status",
+    "/auth/login", "/auth/logout",
+}
 
 # Name of the cookie holding a browser's proof of authentication.
 #
@@ -152,6 +162,31 @@ def _record_audit(action: str, *, outcome: str = "ok", session_id: str | None = 
     ))
 
 
+# Real accounts, when this instance uses them. None means it does not, and
+# every path below falls back to the shared-token behaviour unchanged.
+#
+# Three authentication modes exist rather than two because removing the shared
+# token would break every instance already running on it. They are tried in
+# order of specificity: accounts, then token, then open.
+_accounts = accounts_mod.build_account_store()
+
+
+def accounts_active() -> bool:
+    return _accounts is not None
+
+
+def _current_user(request: Request):
+    """The signed-in user for this request, or None.
+
+    Reads the same cookie the shared-token mode uses. The value means
+    different things in the two modes — a session token here, the shared
+    secret there — which is fine because only one mode is ever active.
+    """
+    if _accounts is None:
+        return None
+    return _accounts.user_for_token(_supplied_token(request))
+
+
 def _principal(request: Request) -> str:
     """A stable, non-secret identity for the caller.
 
@@ -164,6 +199,19 @@ def _principal(request: Request) -> str:
     With auth off, the client address stands in, so a rate limit still
     distinguishes two machines on a LAN even though neither authenticates.
     """
+    if _accounts is not None:
+        user = _current_user(request)
+        if user is not None:
+            # The identity that makes session ownership mean something between
+            # two colleagues rather than between two shared-secret holders.
+            return user.principal
+        # An unauthenticated caller under accounts mode still needs a
+        # rate-limit key, and it must not be a single shared bucket that one
+        # attacker can exhaust for everyone. The address is the only thing
+        # known about them.
+        client = request.client.host if request.client else "unknown"
+        return f"anon:{client}"
+
     if config.auth_token:
         supplied = _supplied_token(request)
         if supplied:
@@ -260,6 +308,20 @@ async def _observe_request(request: Request, call_next):
 
 @app.middleware("http")
 async def _require_auth_token(request: Request, call_next):
+    if _accounts is not None and request.url.path not in _AUTH_EXEMPT_PATHS:
+        if _current_user(request) is None:
+            logger.warning(
+                "unauthenticated request", extra={"path": request.url.path}
+            )
+            _record_audit(
+                audit_mod.AUTH_FAILED, outcome="denied",
+                principal=_principal(request), path=request.url.path,
+            )
+            return JSONResponse(
+                {"detail": "Sign in to use this instance."}, status_code=401
+            )
+        return await call_next(request)
+
     if config.auth_token and request.url.path not in _AUTH_EXEMPT_PATHS:
         if not _token_ok(_supplied_token(request)):
             logger.warning(
@@ -332,6 +394,66 @@ class AuthReq(BaseModel):
     token: str = Field(min_length=1, max_length=512)
 
 
+class LoginReq(BaseModel):
+    username: str = Field(min_length=1, max_length=accounts_mod.MAX_USERNAME)
+    password: str = Field(min_length=1, max_length=accounts_mod.MAX_PASSWORD)
+
+
+def _set_auth_cookie(response: JSONResponse, value: str, request: Request,
+                     max_age: int) -> None:
+    """The one place a credential cookie is written, so its flags cannot drift.
+
+    HttpOnly blocks exfiltration by an XSS payload. SameSite=Strict is what
+    stops a cross-site request riding the cookie, which matters because the
+    API is served with allow_credentials=True. Secure is set only when the
+    request arrived over HTTPS — forcing it would make the cookie unsettable
+    on the documented plain-HTTP LAN setup, with no error the user could see.
+    """
+    response.set_cookie(
+        AUTH_COOKIE_NAME, value, httponly=True, samesite="strict",
+        secure=request.url.scheme == "https", max_age=max_age, path="/",
+    )
+
+
+@app.post("/auth/login")
+def login(req: LoginReq, request: Request):
+    """Sign in with a username and password. Accounts mode only.
+
+    Rate limited by the same per-principal bucket as everything else, which
+    under accounts mode keys unauthenticated callers by address — so password
+    guessing is bounded per source rather than globally.
+    """
+    if _accounts is None:
+        raise HTTPException(
+            400,
+            "This instance does not use accounts. "
+            "It is either open or uses a shared token.",
+        )
+
+    user = _accounts.authenticate(req.username, req.password)
+    if user is None:
+        # One message for wrong user, wrong password and disabled account.
+        # Distinguishing them tells an attacker which usernames exist here.
+        logger.warning("failed sign-in", extra={"username": req.username[:64]})
+        _record_audit(
+            audit_mod.AUTH_FAILED, outcome="denied",
+            principal=_principal(request), username=req.username[:64],
+        )
+        raise HTTPException(401, "That username and password did not match.")
+
+    token = _accounts.open_session(user)
+    response = JSONResponse({
+        "required": True, "authenticated": True, "user": user.to_dict(),
+    })
+    _set_auth_cookie(response, token, request, accounts_mod.SESSION_TTL_SECONDS)
+    logger.info("sign-in", extra={"username": user.username})
+    _record_audit(
+        audit_mod.AUTH_SUCCEEDED, principal=user.principal,
+        username=user.username, role=user.role,
+    )
+    return response
+
+
 @app.post("/auth/session")
 def open_auth_session(req: AuthReq, request: Request):
     """Exchange the shared token for an HttpOnly cookie.
@@ -364,30 +486,70 @@ def open_auth_session(req: AuthReq, request: Request):
 
 @app.get("/auth/status")
 def auth_status(request: Request):
-    """Whether auth is on, and whether this caller already satisfies it."""
+    """Which authentication mode this instance uses, and who the caller is.
+
+    ``mode`` is reported rather than left to be inferred, because the sign-in
+    form differs between them: accounts mode needs a username and password,
+    token mode needs one secret, and open mode needs nothing. A client that
+    guessed would show the wrong form.
+    """
+    if _accounts is not None:
+        user = _current_user(request)
+        return {
+            "mode": "accounts",
+            "required": True,
+            "authenticated": user is not None,
+            "user": user.to_dict() if user else None,
+        }
     if not config.auth_token:
-        return {"required": False, "authenticated": True}
+        return {"mode": "open", "required": False, "authenticated": True}
     return {
+        "mode": "token",
         "required": True,
         "authenticated": _token_ok(_supplied_token(request)),
+        "user": None,
     }
 
 
 @app.post("/auth/logout")
-def close_auth_session():
+def close_auth_session(request: Request):
+    # Revoked server-side under accounts mode, not merely forgotten by the
+    # browser: a token that stays valid after sign-out is still a working
+    # credential for anyone who captured it.
+    if _accounts is not None:
+        _accounts.close_session(_supplied_token(request))
     response = JSONResponse({"authenticated": False})
     response.delete_cookie(AUTH_COOKIE_NAME, path="/")
     return response
 
 
+# A bearer token a scraper presents to read /metrics. Empty (the default)
+# keeps the endpoint open, which is right for the local case and for a
+# Prometheus on the same host: a scraper is infrastructure, not a user, and
+# nothing here names a column, a value or a filename.
+#
+# It is worth having because "reveals load and error rates, not data" is only
+# true of the *content*. Request volume and upload sizes over time are
+# themselves information in some deployments, and an operator who judges that
+# should not have to reach for a proxy to act on it.
+METRICS_TOKEN = os.getenv("LANA_METRICS_TOKEN", "")
+
+
 @app.get("/metrics")
-def metrics():
+def metrics(request: Request):
     """Prometheus exposition. Counts and latencies only — never data.
 
-    Deliberately unauthenticated, like /health: a scraper is infrastructure.
-    Nothing here names a column, a value or a filename, so exposing it reveals
-    load and error rates, not anyone's dataset.
+    Open by default, like /health. Set LANA_METRICS_TOKEN to require
+    `Authorization: Bearer <token>` if load patterns are sensitive where this
+    runs.
     """
+    if METRICS_TOKEN:
+        header = request.headers.get("authorization", "")
+        supplied = header[7:] if header.lower().startswith("bearer ") else ""
+        if not hmac.compare_digest(supplied, METRICS_TOKEN):
+            return JSONResponse(
+                {"detail": "Missing or invalid metrics token."}, status_code=401
+            )
     stats = _store.stats()
     obs.sessions_active.set(float(stats["sessions"]))
     obs.sessions_bytes.set(float(stats["frame_mb"]) * 1024 ** 2)
@@ -478,15 +640,28 @@ def _log_security_posture() -> None:
     happens exactly once per worker, which is what "startup" means here, and
     it avoids FastAPI's deprecated ``on_event`` hook.
     """
+    from app import crypto
     from app.sources.files import allowed_roots
     from app.sources.security import private_urls_allowed
 
+    if _accounts is not None:
+        auth_mode = "accounts"
+    elif config.auth_token:
+        auth_mode = "token"
+    else:
+        auth_mode = "open"
+
     posture = {
-        "auth": "token" if config.auth_token else "open",
+        "auth": auth_mode,
         "persist_sessions": config.limits.persist_sessions,
+        "encryption_at_rest": crypto.describe(),
+        "audit": bool(getattr(_audit, "enabled", False)),
         "sql_grounding": SQL_GROUNDING_ENABLED,
         "private_source_urls": private_urls_allowed(),
         "file_source_roots": len(allowed_roots()),
+        "metrics_auth": bool(METRICS_TOKEN),
+        "llm_local": config.llm.provider == "ollama"
+        and _is_local_host(config.llm.ollama_host),
         "cors_origins": len(config.allowed_origins),
     }
     logger.info("security posture", extra=posture)
@@ -496,7 +671,7 @@ def _log_security_posture() -> None:
     # which is what an operator does when they are serving LANA to a browser
     # somewhere else. Warned about specifically, because the general startup
     # line above would be lost in a log the first time it mattered.
-    if not config.auth_token and any(
+    if auth_mode == "open" and any(
         "localhost" not in origin and "127.0.0.1" not in origin
         for origin in config.allowed_origins
     ):
@@ -643,6 +818,22 @@ def reset_llm_probe_cache() -> None:
     _llm_probe_cache = None
 
 
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def _is_local_host(url: str) -> bool:
+    """Whether a provider URL points at this machine.
+
+    host.docker.internal counts: it resolves to the host running the
+    container, which is still the user's own machine and is what
+    docker-compose.yml configures by default.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    return host in _LOCAL_HOSTS or host == "host.docker.internal"
+
+
 def _llm_status() -> dict:
     """Reachability of the configured provider, cached briefly."""
     global _llm_probe_cache
@@ -662,7 +853,19 @@ def _llm_status() -> dict:
     try:
         try:
             provider = get_provider()
-            status = {"available": provider.is_available(), "name": provider.name}
+            status = {
+                "available": provider.is_available(),
+                "name": provider.name,
+                # Stated rather than left to be inferred from the provider
+                # name. "100% local, no data leaves your machine" is LANA's
+                # headline claim and it stops being true the moment someone
+                # points LLM_PROVIDER at a hosted endpoint — which is a
+                # legitimate thing to do, and exactly why it should be visible
+                # in the interface instead of only in a .env file nobody
+                # rereads.
+                "local": config.llm.provider == "ollama"
+                and _is_local_host(config.llm.ollama_host),
+            }
         except Exception as e:
             status = {
                 "available": False, "name": None,
@@ -815,9 +1018,23 @@ async def upload(file: UploadFile = File(...)):
     profiles = await run_in_threadpool(session.profiles)
     quality = dataset_quality(profiles, len(df))
 
+    # Text in the data that reads like an instruction to a model. This does
+    # not block anything and does not claim to have neutralised the risk —
+    # see app/llm/injection.py on why nothing can. It tells the person whose
+    # data it is, which is the defence that actually works: someone who knows
+    # a cell says "ignore previous instructions" reads the answers very
+    # differently from someone who does not.
+    injection = await run_in_threadpool(scan_frame, df)
+    if injection.found:
+        logger.warning(
+            "dataset contains instruction-shaped text",
+            extra={"session_id": sid, "findings": len(injection.findings)},
+        )
+
     return _jsonable({
         "session_id": sid,
         "filename": file.filename,
+        "injection": injection.to_dict(),
         "rows": len(df),
         "columns": df.columns.tolist(),
         "numeric_columns": df.select_dtypes("number").columns.tolist(),
@@ -1016,9 +1233,17 @@ async def load_source(req: SourceSpecReq, request: Request):
         label=result.label, rows=len(df), columns=len(df.columns),
     )
 
+    injection = await run_in_threadpool(scan_frame, df)
+    if injection.found:
+        logger.warning(
+            "dataset contains instruction-shaped text",
+            extra={"session_id": sid, "findings": len(injection.findings)},
+        )
+
     return _jsonable({
         "session_id": sid,
         "filename": result.label,
+        "injection": injection.to_dict(),
         "source": {"kind": req.kind, **result.to_dict()},
         "rows": len(df),
         "columns": df.columns.tolist(),
