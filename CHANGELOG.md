@@ -11,6 +11,21 @@ missing — see [`docs/engineering-changelog.md`](docs/engineering-changelog.md)
 
 ### Added
 
+- **Crash visibility.** A route that genuinely crashes is now caught,
+  logged with a full traceback and its request id, and counted separately
+  from an ordinary error response via the new `lana_unhandled_exceptions_total`
+  metric — previously a crash and a deliberate `HTTPException(500, ...)`
+  were indistinguishable in both the logs and the metrics. The caller still
+  only ever sees a generic `{"detail": "Internal server error."}`, never
+  the traceback. No new dependency; `docs/alerting.md` has example
+  Prometheus/Alertmanager rules for wiring this into real notifications.
+- **`python -m scripts.backup`.** Snapshots `accounts.db`, persisted
+  sessions and the audit trail (including rotated audit files) into a
+  timestamped, retention-pruned local archive, with a `restore` command and
+  full docs at `docs/backup-and-restore.md` — what's included, what's
+  deliberately excluded (`coordination.db`, purely ephemeral), why
+  `LANA_ENCRYPTION_KEY` must be kept separately from any backup, and
+  scheduling examples for cron, Windows Task Scheduler and Docker.
 - **Reverse-proxy SSO.** Set `LANA_TRUSTED_HEADER_NAME` and
   `LANA_TRUSTED_HEADER_SECRET` together and LANA will trust an identity
   header set by oauth2-proxy, Authelia or a similar reverse proxy in front
