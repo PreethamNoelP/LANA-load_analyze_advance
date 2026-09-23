@@ -8,6 +8,7 @@ import KpiTiles from './components/KpiTiles.jsx'
 import AskAI from './components/AskAI.jsx'
 import Visualize from './components/Visualize.jsx'
 import Analyze from './components/Analyze.jsx'
+import Investigate from './components/Investigate.jsx'
 import Export from './components/Export.jsx'
 import Clean from './components/Clean.jsx'
 import Recommendations from './components/Recommendations.jsx'
@@ -25,6 +26,7 @@ const TABS = [
   { id: 'clean',     label: 'Clean' },
   { id: 'visualize', label: 'Visualize' },
   { id: 'analyze',   label: 'Analyze' },
+  { id: 'investigate', label: 'Investigate' },
   { id: 'export',    label: 'Export' },
 ]
 
@@ -453,6 +455,9 @@ export default function App() {
               </div>
               <div style={{ marginTop: 24, display: tab === 'analyze' ? 'block' : 'none' }}>
                 <Analyze session={session} />
+              </div>
+              <div style={{ marginTop: 24, display: tab === 'investigate' ? 'block' : 'none' }}>
+                <Investigate session={session} />
               </div>
               <div style={{ marginTop: 24, display: tab === 'export' ? 'block' : 'none' }}>
                 <Export session={session} />

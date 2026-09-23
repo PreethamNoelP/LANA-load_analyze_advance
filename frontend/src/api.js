@@ -200,6 +200,19 @@ export async function getHealth() {
   return ok(await request('/health', { timeoutMs: 8_000 }))
 }
 
+// Two LLM calls (propose candidate drivers, then narrate the corrected
+// results) bracket real statistical tests against the actual rows, so this
+// legitimately takes longer than a single question — the analysis deadline
+// applies, not the metadata one.
+export async function runInvestigation(sessionId, targetColumn) {
+  return ok(await request('/investigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, target_column: targetColumn }),
+    timeoutMs: ANALYSIS_TIMEOUT_MS,
+  }))
+}
+
 export async function getRecommendations(sessionId) {
   return ok(await request(`/recommendations/${encodeURIComponent(sessionId)}`,
     { timeoutMs: ANALYSIS_TIMEOUT_MS }))
