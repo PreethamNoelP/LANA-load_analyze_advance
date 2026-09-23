@@ -383,3 +383,49 @@ def test_label_values_are_escaped():
     counter = obs.Counter("t_total", "test")
     counter.inc(path='/a"b')
     assert '\\"' in "\n".join(counter.render())
+
+
+def test_an_unhandled_exception_is_a_clean_500_not_a_leaked_traceback(
+    monkeypatch, caplog
+):
+    """A route that genuinely crashes must not hand the caller a stack trace."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated crash, deep inside a route handler")
+
+    # Raised from inside the route body itself — the code path
+    # @app.exception_handler(Exception) exists to catch. Starlette's
+    # ServerErrorMiddleware does call that handler and send its response,
+    # but always re-raises the original exception afterward too, so a test
+    # (or a server operator) can still see it — hence raise_server_exceptions
+    # =False here, the same reason tests/test_auth.py's own client fixture
+    # sets it, to actually inspect the response rather than the re-raise.
+    monkeypatch.setattr(backend_main._store, "stats", _boom)
+    client = TestClient(backend_main.app, raise_server_exceptions=False)
+
+    import logging
+    with caplog.at_level(logging.ERROR, logger="lana"):
+        response = client.get("/health")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error."}
+    assert "simulated crash" not in response.text
+    assert response.headers["X-Request-ID"]
+
+    record = next(r for r in caplog.records if r.message == "unhandled exception")
+    assert record.exc_info is not None
+    assert record.template == "/health"
+
+
+def test_an_unhandled_exception_is_counted_separately_from_a_deliberate_500(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(backend_main._store, "stats", _boom)
+    client = TestClient(backend_main.app, raise_server_exceptions=False)
+    before = "\n".join(obs.unhandled_exceptions.render())
+
+    client.get("/health")
+
+    after = "\n".join(obs.unhandled_exceptions.render())
+    assert after != before
+    assert 'path="/health"' in after

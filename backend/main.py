@@ -322,6 +322,12 @@ async def _observe_request(request: Request, call_next):
     the timing covers auth and rate limiting rather than just the handler.
     """
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
+    # Also on request.state, not just the ContextVar: an unhandled exception
+    # propagates out through this middleware's own `finally` below — which
+    # resets the ContextVar — before Starlette's ServerErrorMiddleware (which
+    # sits *outside* this one) calls _handle_unhandled_exception. state
+    # survives that; the ContextVar does not.
+    request.state.request_id = request_id
     id_token = obs.request_id_var.set(request_id)
     principal = _principal(request)
     principal_token = obs.principal_var.set(principal)
@@ -357,6 +363,51 @@ async def _observe_request(request: Request, call_next):
         )
         obs.principal_var.reset(principal_token)
         obs.request_id_var.reset(id_token)
+
+
+@app.exception_handler(Exception)
+async def _handle_unhandled_exception(request: Request, exc: Exception):
+    """The last line of defence for a route that genuinely crashed.
+
+    Distinguishing this from a deliberate ``raise HTTPException(500, ...)``
+    is the point — see ``lana_unhandled_exceptions_total``'s own docstring in
+    app/observability.py. Registered as a FastAPI exception handler rather
+    than caught inside ``_observe_request``'s own try/except: Starlette's
+    ExceptionMiddleware sits *inside* the ``@app.middleware("http")`` stack,
+    closer to the route, so this is what actually catches an exception raised
+    deep in a handler. A try/except wrapped around ``call_next()`` in an outer
+    ``BaseHTTPMiddleware``-style handler does not reliably see it, because
+    each of those middlewares runs the next one in a separate task under the
+    hood — confirmed the hard way, by a test that failed against exactly that
+    approach before this one replaced it.
+
+    ``_observe_request``'s own ``finally`` block still records this normally
+    — its "request" line and ``lana_http_requests_total`` counter fire
+    whether or not this handler ran, since ``finally`` runs regardless. This
+    handler adds the ERROR-level line with the actual traceback and the
+    metric that distinguishes a crash from ordinary error traffic.
+
+    X-Request-ID is set here directly, from ``request.state`` rather than
+    ``obs.request_id_var``: Starlette's ``ServerErrorMiddleware`` sits
+    *outside* ``_observe_request`` and only calls this handler once the
+    exception has propagated all the way out — by which point
+    ``_observe_request``'s own ``finally`` block has already reset that
+    ContextVar. ``request.state`` isn't touched by that reset, so it survives.
+    """
+    template = _path_template(request.url.path)
+    obs.unhandled_exceptions.inc(path=template)
+    logger.error(
+        "unhandled exception",
+        exc_info=exc,
+        extra={"path": request.url.path, "template": template},
+    )
+    # Never the bare traceback — the same reasoning SECURITY.md gives for
+    # sanitising LLM provider errors before they reach the browser.
+    response = JSONResponse({"detail": "Internal server error."}, status_code=500)
+    request_id = getattr(request.state, "request_id", "")
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+    return response
 
 
 @app.middleware("http")

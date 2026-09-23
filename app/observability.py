@@ -404,3 +404,12 @@ sessions_bytes = gauge("lana_sessions_bytes", "Resident bytes across all session
 rate_limited = counter(
     "lana_rate_limited_total", "Requests rejected by the rate limiter, by scope."
 )
+
+# Distinct from lana_http_requests_total{status="500"}: that counts every 500,
+# including a deliberate `raise HTTPException(500, ...)`. This counts only a
+# route that actually crashed — the signal an alert should fire on, since the
+# former happens in ordinary operation and the latter never should.
+unhandled_exceptions = counter(
+    "lana_unhandled_exceptions_total",
+    "Unhandled exceptions escaping a route, by path template.",
+)
