@@ -10,9 +10,15 @@ import * as api from '../api.js'
 vi.mock('../api.js', () => ({
   getAuthStatus: vi.fn(),
   openAuthSession: vi.fn(),
+  login: vi.fn(),
+  requestPasswordReset: vi.fn(),
+  resetPassword: vi.fn(),
 }))
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  window.history.pushState({}, '', '/')
+})
 
 describe('AuthGate', () => {
   it('renders the app untouched when no token is required', async () => {
@@ -85,5 +91,91 @@ describe('AuthGate', () => {
     const { container } = render(<AuthGate><div>the app</div></AuthGate>)
     // No flash of either the app or the gate before the answer arrives.
     expect(container).toBeEmptyDOMElement()
+  })
+
+  it('shows the accounts sign-in form and a forgot-password link', async () => {
+    api.getAuthStatus.mockResolvedValue({ mode: 'accounts', required: true, authenticated: false })
+    render(<AuthGate><div>the app</div></AuthGate>)
+    await waitFor(() => expect(screen.getByPlaceholderText('Username')).toBeInTheDocument())
+    expect(screen.getByText('Forgot password?')).toBeInTheDocument()
+  })
+
+  it('requests a reset link and shows the server response', async () => {
+    const user = userEvent.setup()
+    api.getAuthStatus.mockResolvedValue({ mode: 'accounts', required: true, authenticated: false })
+    api.requestPasswordReset.mockResolvedValue({
+      detail: 'If that account exists, a reset link has been sent to it.',
+    })
+
+    render(<AuthGate><div>the app</div></AuthGate>)
+    await waitFor(() => expect(screen.getByPlaceholderText('Username')).toBeInTheDocument())
+
+    await user.click(screen.getByText('Forgot password?'))
+    await user.type(screen.getByPlaceholderText('Username'), 'alice')
+    await user.click(screen.getByRole('button', { name: /Send reset link/ }))
+
+    await waitFor(() =>
+      expect(screen.getByText(/reset link has been sent/)).toBeInTheDocument())
+    expect(api.requestPasswordReset).toHaveBeenCalledWith('alice')
+  })
+
+  it('returns to sign-in from the forgot-password view', async () => {
+    const user = userEvent.setup()
+    api.getAuthStatus.mockResolvedValue({ mode: 'accounts', required: true, authenticated: false })
+
+    render(<AuthGate><div>the app</div></AuthGate>)
+    await waitFor(() => expect(screen.getByPlaceholderText('Username')).toBeInTheDocument())
+
+    await user.click(screen.getByText('Forgot password?'))
+    await waitFor(() => expect(screen.getByText('Reset your password')).toBeInTheDocument())
+
+    await user.click(screen.getByText('Back to sign in'))
+    await waitFor(() => expect(screen.getByText('Sign in to LANA')).toBeInTheDocument())
+  })
+
+  it('shows the reset-password form when the URL carries a token', async () => {
+    window.history.pushState({}, '', '/?token=abc123')
+    api.getAuthStatus.mockResolvedValue({ mode: 'accounts', required: true, authenticated: false })
+
+    render(<AuthGate><div>the app</div></AuthGate>)
+    await waitFor(() =>
+      expect(screen.getByText('Set a new password')).toBeInTheDocument())
+    // The token must not linger in the visible URL once read.
+    expect(window.location.search).toBe('')
+  })
+
+  it('submits the new password with the token from the URL', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/?token=abc123')
+    api.getAuthStatus.mockResolvedValue({ mode: 'accounts', required: true, authenticated: false })
+    api.resetPassword.mockResolvedValue({ detail: 'ok' })
+
+    render(<AuthGate><div>the app</div></AuthGate>)
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('New password')).toBeInTheDocument())
+
+    await user.type(screen.getByPlaceholderText('New password'), 'a-brand-new-password')
+    await user.click(screen.getByRole('button', { name: /Set new password/ }))
+
+    await waitFor(() =>
+      expect(screen.getByText(/password has been changed/)).toBeInTheDocument())
+    expect(api.resetPassword).toHaveBeenCalledWith('abc123', 'a-brand-new-password')
+  })
+
+  it('shows an error for an invalid or expired reset token', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/?token=stale')
+    api.getAuthStatus.mockResolvedValue({ mode: 'accounts', required: true, authenticated: false })
+    api.resetPassword.mockRejectedValue(new Error('That reset link is invalid or has expired.'))
+
+    render(<AuthGate><div>the app</div></AuthGate>)
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('New password')).toBeInTheDocument())
+
+    await user.type(screen.getByPlaceholderText('New password'), 'a-brand-new-password')
+    await user.click(screen.getByRole('button', { name: /Set new password/ }))
+
+    await waitFor(() =>
+      expect(screen.getByText(/invalid or has expired/)).toBeInTheDocument())
   })
 })

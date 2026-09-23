@@ -82,11 +82,16 @@ AUTH_FAILED = "auth.failed"
 # Successful sign-ins matter as much as failed ones: "nobody signed in that
 # night" is only an answer if successes are recorded too.
 AUTH_SUCCEEDED = "auth.succeeded"
+# A reset request and its completion are recorded separately: the first is
+# something anyone can trigger against any username (that's the point of the
+# generic response), the second is proof a token was actually redeemed.
+PASSWORD_RESET_REQUESTED = "auth.password_reset_requested"
+PASSWORD_RESET_COMPLETED = "auth.password_reset_completed"
 
 ACTIONS = frozenset({
     DATA_LOADED, DATA_CLEANED, DATA_EXPORTED, DATA_VERSION_SWITCHED,
     QUESTION_ANSWERED, SOURCE_TESTED, ACCESS_DENIED, AUTH_FAILED,
-    AUTH_SUCCEEDED,
+    AUTH_SUCCEEDED, PASSWORD_RESET_REQUESTED, PASSWORD_RESET_COMPLETED,
 })
 
 # Rotate at this size and keep this many old files. Bounded because an audit

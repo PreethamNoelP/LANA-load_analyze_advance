@@ -45,6 +45,24 @@ services:
       # worse surprise here than the disk cost of keeping them.
       LANA_PERSIST_SESSIONS: ${LANA_PERSIST_SESSIONS:-true}
       LANA_AUTH_TOKEN: ${LANA_AUTH_TOKEN:-}
+      LANA_ACCOUNTS: ${LANA_ACCOUNTS:-false}
+      LANA_ACCOUNTS_DB: ${LANA_ACCOUNTS_DB:-}
+      # Trusted-header SSO — both must be set together, or the feature stays
+      # off. See the `oauth2-proxy` service below (with-sso profile) and
+      # SECURITY.md before setting these on an instance anyone else reaches.
+      LANA_TRUSTED_HEADER_NAME: ${LANA_TRUSTED_HEADER_NAME:-}
+      LANA_TRUSTED_HEADER_SECRET: ${LANA_TRUSTED_HEADER_SECRET:-}
+      LANA_TRUSTED_HEADER_DEFAULT_ROLE: ${LANA_TRUSTED_HEADER_DEFAULT_ROLE:-member}
+      # SMTP — password-reset email for local accounts. Leave SMTP_HOST unset
+      # to leave the feature off; /auth/forgot-password still responds the
+      # same either way, it just won't send anything.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      LANA_PUBLIC_URL: ${LANA_PUBLIC_URL:-}
     volumes:
       - lana_data:/data
     extra_hosts:
@@ -100,6 +118,46 @@ services:
       # interface hands anyone on the network a free inference endpoint and,
       # with some models, the ability to pull arbitrary ones onto this host.
       - "127.0.0.1:11434:11434"
+
+  # Opt-in: `docker compose --profile with-sso up`. Puts oauth2-proxy in front
+  # of `frontend` so a client's existing Google Workspace / Entra / Okta
+  # identity provider gates sign-in, instead of LANA's own local accounts.
+  # oauth2-proxy does the actual OAuth/OIDC exchange and, once a request is
+  # authenticated, forwards it to `frontend` (which proxies /api/* to
+  # `backend` per nginx.conf) carrying an identity header — LANA never talks
+  # to the identity provider itself.
+  #
+  # This config covers the identity side only (OAUTH2_PROXY_PASS_USER_HEADERS
+  # is on by default, which is what puts X-Forwarded-Email on the forwarded
+  # request). It deliberately does NOT show how to add the required
+  # X-Lana-Proxy-Secret header — that has to be injected by whatever sits at
+  # your actual network edge (this proxy's own alpha-config
+  # `injectRequestHeaders`, or an nginx/Caddy layer in front of it), and it
+  # MUST overwrite rather than append to any X-Forwarded-Email or
+  # X-Lana-Proxy-Secret a client already sent, or a request could smuggle a
+  # second value past it. See "Trusted-header SSO" in SECURITY.md — read it
+  # before setting LANA_TRUSTED_HEADER_SECRET on an instance anyone else can
+  # reach, this is the one part of this feature that is easy to get wrong.
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    profiles: ["with-sso"]
+    restart: unless-stopped
+    environment:
+      OAUTH2_PROXY_PROVIDER: ${OAUTH2_PROXY_PROVIDER:-oidc}
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${OAUTH2_PROXY_OIDC_ISSUER_URL:?set your IdP's issuer URL}
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID:?set the OAuth app client id}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:?set the OAuth app client secret}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:?generate one with the python -c 'import secrets;print(secrets.token_urlsafe(32))' command}
+      OAUTH2_PROXY_EMAIL_DOMAINS: ${OAUTH2_PROXY_EMAIL_DOMAINS:-*}
+      OAUTH2_PROXY_UPSTREAMS: http://frontend:80/
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+      OAUTH2_PROXY_COOKIE_SECURE: ${OAUTH2_PROXY_COOKIE_SECURE:-true}
+    ports:
+      - "${LANA_BIND:-127.0.0.1}:4180:4180"
+    depends_on:
+      frontend:
+        condition: service_started
 
 volumes:
   lana_data:

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app import accounts as accounts_mod
 from app import audit as audit_mod
+from app import mailer as mailer_mod
 from app import observability as obs
 from app.analysis.regression import perform_linear_regression
 from app.analysis.sql_engine import DUCKDB_AVAILABLE
@@ -94,10 +95,21 @@ app.add_middleware(
 # job is to issue one. Logout is exempt so a browser holding a stale or
 # revoked cookie can still clear it rather than being stuck with a credential
 # the server no longer honours and no way to drop it.
+# /auth/forgot-password and /auth/reset-password are exempt for the same
+# reason as /auth/login: recovering a forgotten password is, definitionally,
+# something you do while not signed in.
 _AUTH_EXEMPT_PATHS = {
     "/health", "/metrics", "/auth/session", "/auth/status",
     "/auth/login", "/auth/logout",
+    "/auth/forgot-password", "/auth/reset-password",
 }
+
+# The header a reverse proxy must set, alongside the configured identity
+# header, before LANA trusts that identity header at all. This is what makes
+# trusted-header auth safe to enable on a Docker network where other
+# containers could otherwise forge X-Forwarded-* headers directly — see
+# app.config.AppConfig.trusted_header_active and SECURITY.md.
+TRUSTED_PROXY_SECRET_HEADER = "x-lana-proxy-secret"
 
 # Name of the cookie holding a browser's proof of authentication.
 #
@@ -128,6 +140,13 @@ LLM_RATE_REFILL_PER_SECOND = config.limits.llm_rate_refill_per_second
 
 _RATE_EXEMPT_PATHS = {"/health", "/metrics"}
 _LLM_PATHS = ("/query", "/query/stream")
+
+# A forgot-password request costs an email send against a real inbox, so it
+# gets its own, far tighter bucket on top of the general one — see
+# LimitsConfig.password_reset_rate_capacity.
+PASSWORD_RESET_RATE_CAPACITY = float(config.limits.password_reset_rate_capacity)
+PASSWORD_RESET_RATE_REFILL_PER_SECOND = config.limits.password_reset_rate_refill_per_second
+_PASSWORD_RESET_PATHS = ("/auth/forgot-password",)
 
 _coordinator = build_coordinator(
     config.limits.data_dir if config.limits.persist_sessions else None
@@ -175,15 +194,49 @@ def accounts_active() -> bool:
     return _accounts is not None
 
 
+def _header_identity(request: Request):
+    """The user asserted by a trusted reverse proxy, or None.
+
+    Only ever consulted when ``config.trusted_header_active`` — both the
+    header name and the shared secret are configured, so this fails closed
+    rather than trusting a header the moment someone sets one env var. The
+    secret comparison happens *before* the identity header is even read: a
+    request missing or failing the secret gets no identity, full stop,
+    regardless of what it claims in the identity header.
+    """
+    if not config.trusted_header_active:
+        return None
+    supplied_secret = request.headers.get(TRUSTED_PROXY_SECRET_HEADER, "")
+    if not hmac.compare_digest(supplied_secret, config.trusted_header_secret):
+        return None
+    identity = request.headers.get(config.trusted_header_name, "").strip()
+    if not identity:
+        return None
+    return _accounts.get_or_create_by_external_id(
+        identity, default_role=config.trusted_header_default_role
+    )
+
+
 def _current_user(request: Request):
     """The signed-in user for this request, or None.
 
-    Reads the same cookie the shared-token mode uses. The value means
-    different things in the two modes — a session token here, the shared
-    secret there — which is fine because only one mode is ever active.
+    Trusted-header identity is checked first when configured, so a request
+    arriving through the proxy never needs a session cookie at all. This is
+    additive, not exclusive: a local password sign-in still works even with
+    header mode configured, so an admin retains a way in if the proxy is
+    ever down — the same reasoning SECURITY.md gives for keeping token mode
+    around after accounts mode shipped.
+
+    Absent header mode, reads the same cookie the shared-token mode uses.
+    The value means different things in the two modes — a session token
+    here, the shared secret there — which is fine because only one mode is
+    ever active.
     """
     if _accounts is None:
         return None
+    header_user = _header_identity(request)
+    if header_user is not None:
+        return header_user
     return _accounts.user_for_token(_supplied_token(request))
 
 
@@ -387,6 +440,21 @@ async def _rate_limit(request: Request, call_next):
                 },
             )
 
+    if request.url.path in _PASSWORD_RESET_PATHS:
+        reset_decision = _coordinator.check_rate(
+            f"pwreset:{principal}", PASSWORD_RESET_RATE_CAPACITY,
+            PASSWORD_RESET_RATE_REFILL_PER_SECOND,
+        )
+        if not reset_decision.allowed:
+            obs.rate_limited.inc(scope="password_reset")
+            return JSONResponse(
+                {"detail": "Too many reset requests. Try again later."},
+                status_code=429,
+                headers={
+                    "Retry-After": str(max(1, int(reset_decision.retry_after_seconds)))
+                },
+            )
+
     return await call_next(request)
 
 
@@ -397,6 +465,15 @@ class AuthReq(BaseModel):
 class LoginReq(BaseModel):
     username: str = Field(min_length=1, max_length=accounts_mod.MAX_USERNAME)
     password: str = Field(min_length=1, max_length=accounts_mod.MAX_PASSWORD)
+
+
+class ForgotPasswordReq(BaseModel):
+    username: str = Field(min_length=1, max_length=accounts_mod.MAX_USERNAME)
+
+
+class ResetPasswordReq(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+    new_password: str = Field(min_length=1, max_length=accounts_mod.MAX_PASSWORD)
 
 
 def _set_auth_cookie(response: JSONResponse, value: str, request: Request,
@@ -523,6 +600,77 @@ def close_auth_session(request: Request):
     return response
 
 
+_FORGOT_PASSWORD_RESPONSE = {
+    "detail": "If that account exists, a reset link has been sent to it.",
+}
+
+
+@app.post("/auth/forgot-password")
+def forgot_password(req: ForgotPasswordReq, request: Request):
+    """Request a password-reset email. Accounts mode only.
+
+    Always returns the same response whether or not the username exists —
+    the alternative turns this endpoint into a way to enumerate who has an
+    account here, the exact thing /auth/login already avoids. Rate limited
+    by its own, much tighter bucket (see PASSWORD_RESET_RATE_CAPACITY) so it
+    cannot be used to flood a real inbox.
+    """
+    if _accounts is None:
+        raise HTTPException(
+            400,
+            "This instance does not use accounts, so there is no password "
+            "to reset.",
+        )
+
+    token = _accounts.create_password_reset(req.username)
+    if token is not None:
+        user = _accounts.get_by_username(req.username)
+        reset_link = f"{config.smtp.public_url}/reset-password?token={token}"
+        sent = mailer_mod.send_password_reset_email(config.smtp, req.username, reset_link)
+        logger.info(
+            "password reset requested", extra={"username": req.username[:64], "sent": sent}
+        )
+        _record_audit(
+            audit_mod.PASSWORD_RESET_REQUESTED,
+            principal=user.principal if user else _principal(request),
+            username=req.username[:64],
+        )
+    return _FORGOT_PASSWORD_RESPONSE
+
+
+@app.post("/auth/reset-password")
+def reset_password(req: ResetPasswordReq, request: Request):
+    """Redeem a reset token for a new password. Accounts mode only.
+
+    Invalidates every existing session for the account (AccountStore.
+    consume_password_reset), the same as a password change made from being
+    signed in — a reset is usually a response to the old password being
+    forgotten or compromised, and either way stale sessions should not
+    survive it.
+    """
+    if _accounts is None:
+        raise HTTPException(
+            400,
+            "This instance does not use accounts, so there is no password "
+            "to reset.",
+        )
+
+    try:
+        user = _accounts.consume_password_reset(req.token, req.new_password)
+    except accounts_mod.AccountError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if user is None:
+        raise HTTPException(400, "That reset link is invalid or has expired.")
+
+    logger.info("password reset completed", extra={"username": user.username})
+    _record_audit(
+        audit_mod.PASSWORD_RESET_COMPLETED, principal=user.principal,
+        username=user.username,
+    )
+    return {"detail": "Your password has been reset. Sign in with your new password."}
+
+
 # A bearer token a scraper presents to read /metrics. Empty (the default)
 # keeps the endpoint open, which is right for the local case and for a
 # Prometheus on the same host: a scraper is infrastructure, not a user, and
@@ -645,7 +793,7 @@ def _log_security_posture() -> None:
     from app.sources.security import private_urls_allowed
 
     if _accounts is not None:
-        auth_mode = "accounts"
+        auth_mode = "accounts+sso" if config.trusted_header_active else "accounts"
     elif config.auth_token:
         auth_mode = "token"
     else:
@@ -663,6 +811,7 @@ def _log_security_posture() -> None:
         "llm_local": config.llm.provider == "ollama"
         and _is_local_host(config.llm.ollama_host),
         "cors_origins": len(config.allowed_origins),
+        "password_reset": config.smtp.configured,
     }
     logger.info("security posture", extra=posture)
 

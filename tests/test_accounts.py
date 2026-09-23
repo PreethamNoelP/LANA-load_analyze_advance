@@ -16,8 +16,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import accounts as acc
+from backend.main import app as _open_mode_app
 
 CSV = b"region,revenue\nnorth,100\nsouth,200\n"
+
+
+@pytest.fixture()
+def client():
+    """A backend in open mode — no accounts, no token. Module-level `app`,
+    not the `api` fixture's reloaded one, so it reflects whatever mode the
+    test process is already in (open, per this suite's defaults)."""
+    return TestClient(_open_mode_app, raise_server_exceptions=False)
 
 
 @pytest.fixture
@@ -202,6 +211,114 @@ def test_a_garbage_token_resolves_to_nobody(store):
     assert store.user_for_token("") is None
 
 
+# ── Trusted-header identity (JIT provisioning) ──────────────────────────────
+
+def test_a_new_header_identity_is_provisioned_and_becomes_admin(store):
+    # The first identity seen this way is still the only administrator this
+    # instance has, exactly like the first CLI-created account.
+    user = store.get_or_create_by_external_id("alice@client.example")
+    assert user.role == acc.ROLE_ADMIN
+    assert user.auth_source == acc.AUTH_SOURCE_HEADER
+
+
+def test_a_later_header_identity_defaults_to_member(store):
+    store.get_or_create_by_external_id("alice@client.example")
+    bob = store.get_or_create_by_external_id("bob@client.example")
+    assert bob.role == acc.ROLE_MEMBER
+
+
+def test_the_same_header_identity_resolves_to_the_same_user(store):
+    first = store.get_or_create_by_external_id("alice@client.example")
+    second = store.get_or_create_by_external_id("alice@client.example")
+    assert first.id == second.id
+
+
+def test_a_header_provisioned_account_has_no_usable_local_password(store):
+    user = store.get_or_create_by_external_id("alice@client.example")
+    # It has *some* hash (the schema requires one), but not one anybody knows.
+    assert store.authenticate(user.username, "") is None
+    assert store.authenticate(user.username, "password123456") is None
+
+
+# ── Password reset ──────────────────────────────────────────────────────────
+
+def test_a_reset_token_lets_you_set_a_new_password(store):
+    store.create_user("alice", "the-original-password")
+    token = store.create_password_reset("alice")
+    assert token is not None
+
+    user = store.consume_password_reset(token, "a-brand-new-password")
+    assert user.username == "alice"
+    assert store.authenticate("alice", "a-brand-new-password") is not None
+    assert store.authenticate("alice", "the-original-password") is None
+
+
+def test_requesting_a_reset_for_an_unknown_user_returns_none(store):
+    # The caller must give the same response either way — see
+    # backend/main.py:forgot_password — so the distinction has to be made
+    # here, not at the HTTP layer.
+    assert store.create_password_reset("nobody-here") is None
+
+
+def test_a_reset_token_is_single_use(store):
+    store.create_user("alice", "the-original-password")
+    token = store.create_password_reset("alice")
+    store.consume_password_reset(token, "a-brand-new-password")
+    assert store.consume_password_reset(token, "yet-another-password") is None
+
+
+def test_an_expired_reset_token_is_rejected(store):
+    store.create_user("alice", "the-original-password")
+    token = store.create_password_reset("alice")
+    with store._lock, store._connect() as conn:
+        conn.execute(
+            "UPDATE password_resets SET expires_at = 0 WHERE token_hash = ?",
+            (acc._token_hash(token),),
+        )
+    assert store.consume_password_reset(token, "a-brand-new-password") is None
+
+
+def test_a_garbage_reset_token_is_rejected(store):
+    store.create_user("alice", "the-original-password")
+    assert store.consume_password_reset("not-a-real-token", "a-new-password") is None
+    assert store.consume_password_reset("", "a-new-password") is None
+
+
+def test_the_reset_token_is_stored_hashed_not_in_the_clear(store):
+    store.create_user("alice", "the-original-password")
+    token = store.create_password_reset("alice")
+    with store._connect() as conn:
+        rows = conn.execute("SELECT token_hash FROM password_resets").fetchall()
+    assert token not in [r["token_hash"] for r in rows]
+
+
+def test_a_reset_requesting_a_new_token_invalidates_the_previous_one(store):
+    # Otherwise an old, forgotten email sitting in an inbox stays a live way
+    # in even after the account holder asked for (and used, or didn't) a
+    # newer one.
+    store.create_user("alice", "the-original-password")
+    old_token = store.create_password_reset("alice")
+    store.create_password_reset("alice")
+    assert store.consume_password_reset(old_token, "a-brand-new-password") is None
+
+
+def test_resetting_a_password_ends_existing_sessions(store):
+    user = store.create_user("alice", "the-original-password")
+    session_token = store.open_session(user)
+    reset_token = store.create_password_reset("alice")
+    store.consume_password_reset(reset_token, "a-brand-new-password")
+    assert store.user_for_token(session_token) is None
+
+
+def test_a_weak_new_password_is_refused_without_burning_the_token(store):
+    store.create_user("alice", "the-original-password")
+    token = store.create_password_reset("alice")
+    with pytest.raises(acc.AccountError):
+        store.consume_password_reset(token, "short")
+    # The token must still work with a valid password afterwards.
+    assert store.consume_password_reset(token, "a-brand-new-password") is not None
+
+
 # ── Through the API ─────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -331,3 +448,70 @@ def test_a_sign_in_is_recorded_in_the_audit_trail(api, tmp_path, monkeypatch):
     # Neither the password nor anything derived from it may be recorded.
     assert "a-long-enough-password" not in written
     assert "nope-nope" not in written
+
+
+# ── Password reset, through the API ─────────────────────────────────────────
+
+def test_forgot_password_gives_the_same_response_either_way(api):
+    client, _ = api
+    real = client.post("/auth/forgot-password", json={"username": "alice"})
+    fake = client.post("/auth/forgot-password", json={"username": "nobody-here"})
+    assert real.status_code == fake.status_code == 200
+    assert real.json() == fake.json()
+
+
+def test_reset_password_with_a_valid_token_changes_it(api):
+    client, backend_main = api
+    token = backend_main._accounts.create_password_reset("alice")
+
+    response = client.post(
+        "/auth/reset-password",
+        json={"token": token, "new_password": "a-brand-new-password"},
+    )
+    assert response.status_code == 200
+
+    client.cookies.clear()
+    _sign_in(client, "alice", "a-brand-new-password")
+
+
+def test_reset_password_rejects_an_invalid_token(api):
+    client, _ = api
+    response = client.post(
+        "/auth/reset-password",
+        json={"token": "not-a-real-token", "new_password": "a-brand-new-password"},
+    )
+    assert response.status_code == 400
+
+
+def test_reset_password_invalidates_the_signed_in_session(api):
+    client, backend_main = api
+    _sign_in(client, "alice", "a-long-enough-password")
+    assert client.get("/auth/status").json()["authenticated"] is True
+
+    token = backend_main._accounts.create_password_reset("alice")
+    client.post(
+        "/auth/reset-password",
+        json={"token": token, "new_password": "a-brand-new-password"},
+    )
+
+    # The cookie from before the reset must no longer work.
+    assert client.get("/auth/status").json()["authenticated"] is False
+
+
+def test_forgot_password_is_refused_outside_accounts_mode(client):
+    assert client.post(
+        "/auth/forgot-password", json={"username": "alice"}
+    ).status_code == 400
+
+
+def test_forgot_password_has_its_own_tighter_rate_limit(api, monkeypatch):
+    client, backend_main = api
+    monkeypatch.setattr(backend_main, "PASSWORD_RESET_RATE_CAPACITY", 2.0)
+    monkeypatch.setattr(backend_main, "PASSWORD_RESET_RATE_REFILL_PER_SECOND", 0.0)
+
+    for _ in range(2):
+        assert client.post(
+            "/auth/forgot-password", json={"username": "alice"}
+        ).status_code == 200
+    limited = client.post("/auth/forgot-password", json={"username": "alice"})
+    assert limited.status_code == 429

@@ -115,6 +115,20 @@ class LimitsConfig:
         )
     )
 
+    # A forgot-password request costs an email send and, if abused, spam in a
+    # real inbox — much cheaper to abuse than a login attempt, so it gets its
+    # own bucket rather than sharing the general one. Five requests, then one
+    # every two minutes: enough for someone who mistyped their address once,
+    # not enough to be useful for harassment.
+    password_reset_rate_capacity: int = field(
+        default_factory=lambda: int(os.getenv("LANA_PASSWORD_RESET_RATE_CAPACITY", "5"))
+    )
+    password_reset_rate_refill_per_second: float = field(
+        default_factory=lambda: float(
+            os.getenv("LANA_PASSWORD_RESET_RATE_REFILL_PER_SECOND", str(1 / 120))
+        )
+    )
+
     # How long a browser's auth cookie stays valid. Twelve hours: long enough
     # that a working day needs one sign-in, short enough that a shared machine
     # does not stay authenticated indefinitely.
@@ -140,15 +154,78 @@ class LimitsConfig:
 
 
 @dataclass
+class SmtpConfig:
+    """Outbound mail for password-reset links. Unconfigured by default.
+
+    LANA has no other reason to send email — this exists solely so a local
+    account that forgot its password has a way back in without an admin. If
+    ``host`` is empty, the feature is simply off: /auth/forgot-password still
+    returns its generic response (so the endpoint itself does not reveal
+    whether reset is configured), but no mail is sent and a warning is
+    logged server-side.
+    """
+
+    host: str = field(default_factory=lambda: os.getenv("SMTP_HOST", ""))
+    port: int = field(default_factory=lambda: int(os.getenv("SMTP_PORT", "587")))
+    username: str = field(default_factory=lambda: os.getenv("SMTP_USERNAME", ""))
+    password: str = field(default_factory=lambda: os.getenv("SMTP_PASSWORD", ""))
+    from_address: str = field(default_factory=lambda: os.getenv("SMTP_FROM", ""))
+    use_tls: bool = field(
+        default_factory=lambda: os.getenv("SMTP_USE_TLS", "true").lower()
+        in ("1", "true", "yes")
+    )
+    # Base URL used to build the link inside the reset email, e.g.
+    # https://lana.client-domain.com. Required for the email to be useful —
+    # LANA cannot guess the address a client reaches it at.
+    public_url: str = field(default_factory=lambda: os.getenv("LANA_PUBLIC_URL", ""))
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.host and self.from_address and self.public_url)
+
+
+@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     allowed_origins: list[str] = field(default_factory=_parse_allowed_origins)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
+    smtp: SmtpConfig = field(default_factory=SmtpConfig)
     # Empty (the default) disables auth entirely — every endpoint is open, as
     # LANA has always assumed for a single local user. Set LANA_AUTH_TOKEN to
     # require `Authorization: Bearer <token>` on every request, e.g. when
     # running LANA on a machine reachable by more than just you.
     auth_token: str = field(default_factory=lambda: os.getenv("LANA_AUTH_TOKEN", ""))
+
+    # ── Trusted-header SSO ───────────────────────────────────────────────────
+    # Lets a reverse proxy (oauth2-proxy, Authelia, Cloudflare Access) do the
+    # actual OIDC/SAML dance and hand LANA an already-verified identity via a
+    # header, instead of LANA being an identity provider itself. Requires
+    # accounts mode (LANA_ACCOUNTS=true) — a header identity is just another
+    # way to arrive at a User, not a separate user system.
+    #
+    # Both of the next two must be set for the feature to activate at all.
+    # Trusting an identity header with no shared secret would let anyone who
+    # can reach LANA directly (bypassing the proxy — e.g. another container
+    # on the same Docker network) set `X-Forwarded-Email: admin@client.com`
+    # and walk in as that user. See SECURITY.md before turning this on.
+    trusted_header_name: str = field(
+        default_factory=lambda: os.getenv("LANA_TRUSTED_HEADER_NAME", "")
+    )
+    trusted_header_secret: str = field(
+        default_factory=lambda: os.getenv("LANA_TRUSTED_HEADER_SECRET", "")
+    )
+    # Role a newly-seen header identity gets. The very first user on an
+    # instance is always promoted to admin regardless (see
+    # AccountStore.get_or_create_by_external_id) — an instance with no admin
+    # cannot make one — but every identity after that gets this role until a
+    # human promotes them with `python -m scripts.manage_users role`.
+    trusted_header_default_role: str = field(
+        default_factory=lambda: os.getenv("LANA_TRUSTED_HEADER_DEFAULT_ROLE", "member")
+    )
+
+    @property
+    def trusted_header_active(self) -> bool:
+        return bool(self.trusted_header_name and self.trusted_header_secret)
 
 
 config = AppConfig()

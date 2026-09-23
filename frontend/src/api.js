@@ -311,6 +311,30 @@ export async function closeAuthSession() {
   return ok(await request('/auth/logout', { method: 'POST' }))
 }
 
+// Always resolves with the server's generic message, success or not — the
+// backend deliberately gives the same response whether or not the username
+// exists, so there is nothing more specific for this to distinguish either.
+export async function requestPasswordReset(username) {
+  return ok(await request('/auth/forgot-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username }),
+  }))
+}
+
+export async function resetPassword(token, newPassword) {
+  const res = await request('/auth/reset-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, new_password: newPassword }),
+  })
+  if (res.status === 400) {
+    const err = await res.json().catch(() => ({}))
+    throw new ApiError(err.detail || 'That reset link is invalid or has expired.', { status: 400 })
+  }
+  return ok(res)
+}
+
 
 /* ── Data sources ──────────────────────────────────────────────────────────
  *

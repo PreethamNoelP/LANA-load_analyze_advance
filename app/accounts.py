@@ -88,6 +88,13 @@ ROLE_ADMIN = "admin"
 ROLE_MEMBER = "member"
 ROLES = (ROLE_ADMIN, ROLE_MEMBER)
 
+AUTH_SOURCE_LOCAL = "local"
+AUTH_SOURCE_HEADER = "header"
+
+# How long a password-reset link stays valid. Short on purpose: it grants
+# whoever holds it a new password, so it should not outlive an inbox check.
+PASSWORD_RESET_TTL_SECONDS = 30 * 60
+
 
 class AccountError(Exception):
     """Something the caller can fix. Safe to show a user."""
@@ -99,6 +106,7 @@ class User:
     username: str
     role: str
     disabled: bool = False
+    auth_source: str = AUTH_SOURCE_LOCAL
 
     @property
     def principal(self) -> str:
@@ -138,6 +146,23 @@ _SCHEMA = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id)",
+    """
+    CREATE TABLE IF NOT EXISTS password_resets (
+        token_hash TEXT PRIMARY KEY,
+        user_id    INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        expires_at REAL NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id)",
+)
+
+# Added after the initial release of accounts. Existing databases get these
+# columns bolted on rather than requiring a rebuild — same pattern as
+# backend/persistence.py's own _MIGRATIONS.
+_MIGRATIONS = (
+    "ALTER TABLE users ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'local'",
 )
 
 
@@ -196,6 +221,11 @@ class AccountStore:
         with self._connect() as conn:
             for statement in _SCHEMA:
                 conn.execute(statement)
+            for statement in _MIGRATIONS:
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -242,7 +272,8 @@ class AccountStore:
     def get_by_username(self, username: str) -> User | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, role, disabled FROM users WHERE username = ?",
+                "SELECT id, username, role, disabled, auth_source FROM users "
+                "WHERE username = ?",
                 (username.strip(),),
             ).fetchone()
         return _row_to_user(row)
@@ -250,7 +281,8 @@ class AccountStore:
     def get(self, user_id: int) -> User | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, role, disabled FROM users WHERE id = ?",
+                "SELECT id, username, role, disabled, auth_source FROM users "
+                "WHERE id = ?",
                 (user_id,),
             ).fetchone()
         return _row_to_user(row)
@@ -258,7 +290,8 @@ class AccountStore:
     def list_users(self) -> list[User]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, username, role, disabled FROM users ORDER BY id"
+                "SELECT id, username, role, disabled, auth_source FROM users "
+                "ORDER BY id"
             ).fetchall()
         return [_row_to_user(r) for r in rows]
 
@@ -338,7 +371,7 @@ class AccountStore:
         """
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, password_hash, role, disabled "
+                "SELECT id, username, password_hash, role, disabled, auth_source "
                 "FROM users WHERE username = ?",
                 (username.strip(),),
             ).fetchone()
@@ -362,7 +395,10 @@ class AccountStore:
                     (hash_password(password), row["id"]),
                 )
 
-        return User(id=row["id"], username=row["username"], role=row["role"])
+        return User(
+            id=row["id"], username=row["username"], role=row["role"],
+            auth_source=row["auth_source"],
+        )
 
     def open_session(self, user: User,
                      ttl_seconds: float = SESSION_TTL_SECONDS) -> str:
@@ -384,7 +420,7 @@ class AccountStore:
             return None
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT u.id, u.username, u.role, u.disabled "
+                "SELECT u.id, u.username, u.role, u.disabled, u.auth_source "
                 "FROM auth_sessions s JOIN users u ON u.id = s.user_id "
                 "WHERE s.token_hash = ? AND s.expires_at > ?",
                 (_token_hash(token), time.time()),
@@ -406,6 +442,120 @@ class AccountStore:
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
 
+    # ── Trusted-header identity (reverse-proxy SSO) ─────────────────────────
+
+    def get_or_create_by_external_id(self, identity: str,
+                                     default_role: str = ROLE_MEMBER) -> User:
+        """Look up (or just-in-time create) the user for a proxy-verified identity.
+
+        Called only after the caller has already checked the proxy secret —
+        this method trusts ``identity`` completely. The identity (typically an
+        email address from a header like ``X-Forwarded-Email``) becomes the
+        username, reusing the same validation and "first user is admin" rule
+        as a CLI-created account: an instance whose only user arrives this way
+        still needs someone who can manage it.
+
+        A provisioned account gets a random, never-disclosed password hash —
+        it satisfies the schema's NOT NULL constraint but is not a usable
+        credential, so local password login against a header-provisioned
+        account is infeasible rather than merely discouraged.
+        """
+        username = _clean_username(identity)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, username, role, disabled, auth_source FROM users "
+                "WHERE username = ?",
+                (username,),
+            ).fetchone()
+            if row is not None:
+                return _row_to_user(row)
+
+            first = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+            resolved = ROLE_ADMIN if first else default_role
+            cursor = conn.execute(
+                "INSERT INTO users (username, password_hash, role, created_at, "
+                "auth_source) VALUES (?, ?, ?, ?, ?)",
+                (username, hash_password(secrets.token_urlsafe(32)), resolved,
+                 time.time(), AUTH_SOURCE_HEADER),
+            )
+            return User(
+                id=cursor.lastrowid, username=username, role=resolved,
+                auth_source=AUTH_SOURCE_HEADER,
+            )
+
+    # ── Password reset ───────────────────────────────────────────────────────
+
+    def create_password_reset(self, username: str) -> str | None:
+        """Issue a single-use reset token for ``username``, or None if unknown.
+
+        Callers must return the same generic response whether or not this
+        returns a token — the point of returning ``None`` here rather than
+        raising is to make that easy, not to be told anything more specific.
+        A header-provisioned account (no usable local password) can still
+        request one; doing so simply gives it a local password too.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM users WHERE username = ? AND disabled = 0",
+                (username.strip(),),
+            ).fetchone()
+        if row is None:
+            return None
+
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "DELETE FROM password_resets WHERE expires_at < ? OR user_id = ?",
+                (now, row["id"]),
+            )
+            conn.execute(
+                "INSERT INTO password_resets (token_hash, user_id, created_at, "
+                "expires_at) VALUES (?, ?, ?, ?)",
+                (_token_hash(token), row["id"], now, now + PASSWORD_RESET_TTL_SECONDS),
+            )
+        return token
+
+    def consume_password_reset(self, token: str, new_password: str) -> User | None:
+        """Redeem a reset token for a new password. None if invalid/expired.
+
+        Token validity is checked before the new password is validated, so a
+        request with both a bad token and a weak password fails for the
+        token — the more specific and less confusing reason. Single-use: the
+        row is deleted as part of the same transaction that changes the
+        password, so a token cannot be replayed after a successful reset.
+        Every existing session for the user is revoked, matching
+        ``set_password`` — a password reset is usually a response to the old
+        one being compromised or forgotten, and either way stale sessions
+        should not survive it.
+        """
+        if not token:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT u.id, u.username, u.role, u.disabled, u.auth_source "
+                "FROM password_resets r JOIN users u ON u.id = r.user_id "
+                "WHERE r.token_hash = ? AND r.expires_at > ?",
+                (_token_hash(token), time.time()),
+            ).fetchone()
+        if row is None or row["disabled"]:
+            return None
+
+        _check_password(new_password)
+
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "DELETE FROM password_resets WHERE token_hash = ?",
+                (_token_hash(token),),
+            )
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (hash_password(new_password), row["id"]),
+            )
+            conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (row["id"],))
+
+        return _row_to_user(row)
+
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -422,9 +572,11 @@ def _token_hash(token: str) -> str:
 def _row_to_user(row) -> User | None:
     if row is None:
         return None
+    keys = row.keys()
     return User(
         id=row["id"], username=row["username"], role=row["role"],
-        disabled=bool(row["disabled"]) if "disabled" in row.keys() else False,
+        disabled=bool(row["disabled"]) if "disabled" in keys else False,
+        auth_source=row["auth_source"] if "auth_source" in keys else AUTH_SOURCE_LOCAL,
     )
 
 

@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.accounts import (  # noqa: E402
+    AUTH_SOURCE_LOCAL,
     ROLES,
     AccountError,
     AccountStore,
@@ -126,7 +127,12 @@ def _dispatch(args, store: AccountStore) -> int:
         width = max(len(u.username) for u in users)
         for user in users:
             state = " (disabled)" if user.disabled else ""
-            print(f"{user.username:<{width}}  {user.role}{state}")
+            # Local accounts don't bother naming their source — it's the
+            # common case. A header-provisioned account has no usable local
+            # password (see AccountStore.get_or_create_by_external_id), which
+            # matters to an admin deciding whether `passwd` makes sense here.
+            source = "" if user.auth_source == AUTH_SOURCE_LOCAL else f" [{user.auth_source}]"
+            print(f"{user.username:<{width}}  {user.role}{source}{state}")
         return 0
 
     if args.command == "passwd":
