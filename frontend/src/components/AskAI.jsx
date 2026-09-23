@@ -1,6 +1,37 @@
 import { useEffect, useState } from 'react'
 import { getValidatorCapabilities } from '../api.js'
 
+// A local model plans a query, runs it, and writes the answer before a single
+// byte reaches the browser (see backend/main.py's _query_stream_gen) — there
+// is no intermediate event to reflect, so a per-step status label would be
+// fiction. What the wait genuinely lacks is any sign of life: on a cold
+// Ollama process this measured 60-90s, during which a static "Thinking…" is
+// indistinguishable from a hang. A ticking elapsed time is small, honest, and
+// costs nothing to build wrong the other way.
+function ThinkingIndicator({ since }) {
+  const [elapsedMs, setElapsedMs] = useState(() => Date.now() - since)
+  useEffect(() => {
+    const id = setInterval(() => setElapsedMs(Date.now() - since), 1000)
+    return () => clearInterval(id)
+  }, [since])
+  const seconds = Math.floor(elapsedMs / 1000)
+  return (
+    <div style={{
+      marginLeft: 34, borderLeft: '2px solid var(--border)',
+      paddingLeft: 16, color: 'var(--muted)', fontSize: 13,
+      display: 'flex', alignItems: 'center', gap: 8,
+    }}>
+      <span style={{ animation: 'lana-pulse 1.2s ease-in-out infinite' }}>●</span>
+      Thinking… {seconds}s
+      {seconds >= 20 && (
+        <span style={{ opacity: 0.7 }}>
+          — a local model can take a minute on its first question after starting
+        </span>
+      )}
+    </div>
+  )
+}
+
 // A one-time, collapsed-by-default disclosure rather than a per-message
 // badge — the trust signal that matters on every answer is the warning
 // itself; this is for the person who wants to know exactly what "verified"
@@ -226,14 +257,7 @@ function Message({ msg }) {
 
       {/* Answer */}
       {msg.loading ? (
-        <div style={{
-          marginLeft: 34, borderLeft: '2px solid var(--border)',
-          paddingLeft: 16, color: 'var(--muted)', fontSize: 13,
-          display: 'flex', alignItems: 'center', gap: 8,
-        }}>
-          <span style={{ animation: 'lana-pulse 1.2s ease-in-out infinite' }}>●</span>
-          Thinking…
-        </div>
+        <ThinkingIndicator since={msg.id} />
       ) : msg.error && !msg.a ? (
         <div style={{
           marginLeft: 34, borderLeft: '2px solid var(--red)',
