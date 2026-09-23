@@ -83,6 +83,7 @@ The result: enterprise-quality data analysis with the simplicity of a chat inter
 | 🔒 **100% Local & Private** | No cloud API. No telemetry. No data leaves your machine — and a URL source refuses private, loopback and cloud-metadata addresses so "fetch this URL" cannot be turned into a request forgery against your own network. |
 | 📈 **Production Observability** | Structured JSON logs with a request id on every record, and Prometheus metrics at `GET /metrics` covering request rate, latency histograms, LLM path and outcome, SQL query outcomes, validation verdicts by provenance, and resident sessions. Counts and latencies only — never a column name, a value or a filename. |
 | 👤 **Per-user accounts** | Real sign-in, so your datasets are yours: another account on the same instance cannot open them. scrypt password hashing, server-side revocable sessions, admin-created users (no sign-up page — open registration on an analysis tool means the first stranger to find the port becomes a user). Turn on with `LANA_ACCOUNTS=true`; the single-user default is unchanged. |
+| 🔑 **Reverse-proxy SSO + password reset** | Put oauth2-proxy, Authelia or Cloudflare Access in front of LANA and it will trust the verified identity they hand it (`LANA_TRUSTED_HEADER_NAME` + a shared secret, fail-closed — see SECURITY.md) instead of a local password, so a client's existing Google Workspace/Entra/Okta sign-in just works. For accounts without that in front, `/auth/forgot-password` sends a single-use, 30-minute reset link by email once `SMTP_HOST`/`SMTP_FROM`/`LANA_PUBLIC_URL` are set. |
 | 🔒 **Encryption at rest (optional)** | `LANA_ENCRYPTION_KEY` encrypts persisted datasets with AES-256-GCM — a stolen disk or a leaked backup yields nothing. Stated plainly: it does not protect against anyone who can read the running process, because the key is there. |
 | 🧾 **Auditable** | Data loaded, cleaned, version-switched, questioned and exported — plus refused access and failed sign-ins — are appended to a durable `audit.jsonl` carrying the principal, request id and session. Never cell values, column names or the token: an audit trail that copies the data it audits is a second, less protected copy of that data. Read your own at `GET /audit`. |
 | 🧵 **Safe Under Concurrency** | Per-caller rate limiting, per-session ownership, and an LLM concurrency cap that is enforced *across* uvicorn workers rather than once per worker. Measured: 16 concurrent clients, 196 requests, zero 5xx (`python -m eval.load_test`). |
@@ -434,6 +435,14 @@ Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 > Then each person is a separate identity and cannot open anyone else's
 > datasets. The token mode above is kept for instances already using it, not
 > because it is equivalent.
+>
+> If your client already runs Google Workspace, Microsoft Entra or Okta, put
+> a reverse proxy (oauth2-proxy, Authelia, Cloudflare Access) in front of
+> LANA instead of asking people to remember another password — see
+> `docker-compose.yml`'s `oauth2-proxy` service and "Trusted-header SSO" in
+> [`SECURITY.md`](SECURITY.md). And if someone forgets a local password,
+> `/auth/forgot-password` can email them a reset link once `SMTP_HOST` is
+> configured — see `.env.example`.
 >
 > Setting the token also changes one default on purpose: the `file` connector,
 > which reads a path on the *server's* disk, switches itself off until

@@ -11,6 +11,26 @@ missing — see [`docs/engineering-changelog.md`](docs/engineering-changelog.md)
 
 ### Added
 
+- **Reverse-proxy SSO.** Set `LANA_TRUSTED_HEADER_NAME` and
+  `LANA_TRUSTED_HEADER_SECRET` together and LANA will trust an identity
+  header set by oauth2-proxy, Authelia or a similar reverse proxy in front
+  of it, so a client's existing Google Workspace/Entra/Okta sign-in works
+  without anyone learning a new password. LANA never talks to the identity
+  provider itself — the proxy does that and hands LANA an already-verified
+  identity. Fails closed: both env vars are required together, or the
+  feature stays off. A first-seen identity is provisioned automatically
+  (the first becomes admin, like the first CLI-created account); local
+  password sign-in keeps working as a fallback. See "Trusted-header SSO" in
+  `SECURITY.md` — the shared secret is the entire trust boundary here and is
+  worth reading carefully before turning this on.
+- **Password reset by email.** A local account that forgot its password can
+  request a single-use, 30-minute reset link at `/auth/forgot-password`
+  instead of asking an admin to run `manage_users passwd`. Off until
+  `SMTP_HOST`/`SMTP_FROM`/`LANA_PUBLIC_URL` are set; the endpoint gives the
+  same generic response either way, so it never confirms whether a username
+  exists or whether reset is even configured. Resetting a password ends
+  every existing session for that account, same as changing it while signed
+  in.
 - **User accounts.** Each person on a shared instance is now their own
   identity, so your datasets are yours: another account cannot open them.
   Create users on the machine LANA runs on with

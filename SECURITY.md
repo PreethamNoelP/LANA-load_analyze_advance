@@ -48,9 +48,60 @@ beyond localhost changes the threat model. Two things are expected of you:
    cookie. There is no sign-up page: open registration on an analysis tool
    means the first stranger to find the port becomes a user.
 
-   What this is not: an identity provider. No SSO, OIDC or SAML, and no
-   password-reset flow. An instance that needs those should sit behind a
-   proxy that provides them.
+   What this is not: an identity provider. No native OIDC or SAML — see
+   "Trusted-header SSO" below for how an instance that needs those gets them
+   from a reverse proxy instead. Password reset is covered separately, next.
+
+   **Forgot a password?** Set `SMTP_HOST`, `SMTP_FROM` and `LANA_PUBLIC_URL`
+   (see `.env.example`) and a local account can request a reset link at
+   `/auth/forgot-password` instead of asking an admin to run `manage_users
+   passwd`. The link is single-use, expires in 30 minutes, and resetting a
+   password ends every existing session for that account, the same as a
+   password change made while signed in. The endpoint always returns the
+   same response whether or not the username exists — the same
+   anti-enumeration reasoning as `/auth/login` — so it never confirms who
+   has an account here, and it gives the same response whether or not SMTP
+   is even configured. Without SMTP configured, nothing is sent and a
+   warning is logged server-side; ask an admin to change the password
+   directly instead.
+
+   **Trusted-header SSO.** Set `LANA_TRUSTED_HEADER_NAME` and
+   `LANA_TRUSTED_HEADER_SECRET` together (both, or the feature stays off —
+   it fails closed) and LANA will trust an identity header set by a reverse
+   proxy sitting in front of it — oauth2-proxy, Authelia, Cloudflare
+   Access — instead of requiring a local username and password. The proxy
+   does the actual OAuth/OIDC exchange with your identity provider; LANA
+   never talks to it directly and knows nothing about it beyond the header
+   it's handed. A first-seen identity is provisioned automatically (the very
+   first one on an instance becomes admin, exactly like the first
+   CLI-created account; every one after that gets `member` until promoted
+   with `manage_users role`). Local password sign-in keeps working even with
+   this configured, as a way in if the proxy is ever down.
+
+   Read this before turning it on: **the shared secret is the entire trust
+   boundary.** LANA checks a fixed header, `X-Lana-Proxy-Secret`, against
+   `LANA_TRUSTED_HEADER_SECRET` before it will look at the identity header at
+   all — without that check, anything that can reach LANA directly (another
+   container on the same Docker network, for instance, bypassing the proxy
+   entirely) could set the identity header itself and sign in as anyone,
+   including a name that doesn't exist yet, which this code will happily
+   provision. Two things have to be true of your actual deployment, and
+   nothing in LANA can verify either for you:
+
+   - LANA must not be reachable by anything except the proxy. Keep it off a
+     published port (see `docker-compose.yml`'s `backend` service, loopback
+     by default) and reachable only over the compose network or an
+     equivalent private network.
+   - Your proxy must overwrite, not merely add to, any `X-Lana-Proxy-Secret`
+     or identity header a client already sent on the inbound request, for
+     every request, before it forwards to LANA. Most reverse proxies do this
+     by default for headers they are configured to set, but it is the one
+     property this feature depends on entirely and does not check.
+
+   See `docker-compose.yml`'s `oauth2-proxy` service (`with-sso` profile)
+   for a starting configuration; it covers the identity side only; the
+   secret-header injection at your edge is on you, deliberately not
+   templated here — see the comment in that file for why.
 
    **Shared token (older, still supported).** Every request then needs
    `Authorization: Bearer <token>`, or the HttpOnly cookie a browser gets by
@@ -160,9 +211,19 @@ These are accepted for now, not hidden:
   than accounts, everyone holding the token is the same principal and can see
   each other's sessions. This is why accounts exist; the token mode is kept
   because instances are running on it, not because it is equivalent.
-- **No SSO, and no password reset.** Accounts are local to the instance and
-  managed from its command line. Both are deliberate scope limits rather than
-  omissions, and both are things a reverse proxy can supply.
+- **SSO is trust of a proxy header, not a native identity-provider
+  integration.** LANA never speaks OAuth/OIDC/SAML itself — see
+  "Trusted-header SSO" above. That means no per-client OAuth app to register
+  with LANA, but it also means the entire security of the feature rests on
+  your reverse proxy actually being the only thing that can reach LANA and
+  actually overwriting the trust headers on every request; LANA cannot
+  detect either failing.
+- **Password reset needs SMTP, which is another credential to hold.** The
+  account that sends reset emails is one more thing that can be
+  misconfigured or compromised; a compromised SMTP account can request
+  resets for accounts whose email it can read, same as any email-based
+  reset elsewhere. There is still no password-reset flow for the shared-token
+  mode, because there is no per-user password to reset.
 - **Encryption at rest is optional and protects one thing.** Set
   `LANA_ENCRYPTION_KEY` and persisted frames are encrypted with AES-256-GCM,
   which defeats a stolen volume, a leaked backup, a shared snapshot or a
