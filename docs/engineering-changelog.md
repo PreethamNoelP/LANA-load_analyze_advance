@@ -8,6 +8,52 @@ not just to record what shipped.
 
 ---
 
+## 2026-09-23 — Investigate: the model proposes, the engine decides
+
+**Problem.** Every existing question path answers what was asked. Nothing in
+LANA answered the question that actually motivates most analysis: "what
+explains this number?" A user could ask the ledger or the SQL planner about
+one column at a time, but composing "check these five plausible explanations
+and tell me which ones are real" required doing it by hand, once per
+candidate, and remembering afterward that testing five things at once needed
+correcting for.
+
+**Solution.** `app/analysis/hypothesis.py` + `app/llm/investigate.py`, wired
+in at `POST /investigate`. The local model is used for exactly the thing it
+is good at — proposing plausible candidate drivers of a target metric from
+the schema, with a rationale — and never for the thing it is bad at, which is
+deciding whether one actually holds up. Each candidate is tested with a real
+statistical test against the real rows (Kruskal-Wallis for a categorical
+driver, Pearson for a numeric one), and the whole batch is corrected with the
+same Benjamini-Hochberg routine `app/analysis/statistics.py` already applies
+to the correlation scan — reused rather than re-derived, since testing six
+candidate drivers at once is the identical false-discovery problem as testing
+six column pairs at once. Only what survives correction is reported as
+supported; the narrative step is shown the corrected numbers, not the raw
+data, and is held to the same no-causal-language rule every other answer path
+enforces.
+
+Decisions worth recording:
+
+* **Two model calls, deterministic work in between.** Mirrors
+  `app/llm/sql_answer.py`'s own plan → execute → answer split. The model
+  proposes and narrates; it never touches the p-value.
+* **A parse failure degrades, it does not fail.** A small local model that
+  ignores the "output only JSON" instruction gets a deterministic fallback
+  selection of candidate columns instead of an error — the same "never worse
+  than what it replaced" guarantee the SQL-grounding path makes about its own
+  repair step. Verified live against `phi3:mini`: on the bundled sample
+  dataset, the model correctly separated `marketing_spend` and `region`
+  (survived correction) from `signup_channel` (raw p = 0.047, q = 0.063 —
+  exactly the case false-discovery correction exists to catch) and
+  `customer_age` (negligible effect).
+* **Kruskal-Wallis, not one-way ANOVA.** Rank-based and does not assume
+  normal residuals — the same preference for robust statistics that already
+  motivates the dual IQR/MAD outlier rule and the median-over-mean guidance
+  for skewed columns elsewhere in this codebase.
+
+---
+
 ## 2026-09-20 (second round) — Closing the residual risks
 
 The previous entry ended with a list of accepted limitations. This round
