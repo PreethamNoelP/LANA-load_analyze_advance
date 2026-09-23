@@ -225,3 +225,44 @@ def test_a_validated_answer_credits_the_executed_figure(orders):
     assert validation.verified_count >= 1
     assert validation.executed_count >= 1
     assert validation.trustworthy
+
+
+def test_a_sentence_listing_several_regions_is_not_misattributed():
+    """A correct multi-figure sentence must not be flagged as mislabelled.
+
+    Reproduces a measured false positive: "...highest in the north region
+    with $267.521, followed by the east region with $225.787, west region
+    with $221.854, and south region with $144.504." is entirely correct, but
+    the decimal point in each figure was being read as a sentence-ending
+    period, which truncated the "sentence" searched for the right label right
+    after the first number — dropping "revenue" from the context of every
+    later figure and reporting 3 of 4 correct numbers as misattributed.
+    """
+    from app.llm.context import build_context
+    from app.llm.validation import validate_answer
+
+    rng = np.random.default_rng(3)
+    df = pd.DataFrame({
+        "region": rng.choice(["north", "south", "east", "west"], size=200),
+        "revenue": rng.exponential(150.0, size=200).round(2),
+    })
+    provider = FakeProvider(
+        'SELECT "region", AVG("revenue") AS avg_revenue FROM dataset GROUP BY "region"'
+    )
+    result, _, _ = plan_and_execute(provider, df, "average revenue by region?")
+    facts = {f.category: f for f in facts_from_result(result)}
+
+    context = build_context(df)
+    context.facts.extend(facts.values())
+
+    ordered = sorted(facts.values(), key=lambda f: f.value, reverse=True)
+    answer = (
+        f"The average revenue is highest in the {ordered[0].category} region "
+        f"with {ordered[0].value:.3f}, followed by the {ordered[1].category} "
+        f"region with {ordered[1].value:.3f}, {ordered[2].category} region "
+        f"with {ordered[2].value:.3f}, and {ordered[3].category} region with "
+        f"{ordered[3].value:.3f}."
+    )
+    validation = validate_answer(answer, context)
+    assert validation.misattributed_count == 0, validation.warnings
+    assert validation.trustworthy

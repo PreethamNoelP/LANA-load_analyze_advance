@@ -72,6 +72,12 @@ RULES:
 6. Always alias a computed column to a clear, descriptive snake_case name, e.g. AVG("revenue") AS avg_revenue.
 7. Exclude NULLs where they would distort an aggregate, and use the column's own type — do not cast a VARCHAR to a number unless the question requires it.
 8. If the question cannot be answered from these columns alone, output exactly: CANNOT_ANSWER
+9. To count missing/NULL values PER COLUMN (e.g. "which column has the most missing values"), never use a single CASE expression scanning row-by-row — it only finds the first NULL column in each row, not a true count per column. Instead UNION ALL one row per column:
+   SELECT * FROM (
+     SELECT 'col_a' AS column_name, COUNT(*) - COUNT("col_a") AS missing_count FROM dataset
+     UNION ALL
+     SELECT 'col_b', COUNT(*) - COUNT("col_b") FROM dataset
+   ) AS missing_by_column ORDER BY missing_count DESC
 
 Output the bare SQL and nothing else."""
 

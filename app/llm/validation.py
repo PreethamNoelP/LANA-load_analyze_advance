@@ -340,6 +340,47 @@ def _mentions_all(window: str, names: tuple[str, ...]) -> bool:
     return bool(names) and all(_mentions(window, name) for name in names)
 
 
+def _is_decimal_point(text: str, pos: int) -> bool:
+    """True when ``text[pos]`` is a '.' sitting between two digits.
+
+    A plain ``str.rfind``/``str.find`` for '.' cannot tell a sentence-ending
+    period from the decimal point in a number like "$267.521" — and a
+    multi-figure sentence such as "...highest in the north region with
+    $267.521, followed by the east region with $225.787..." puts several of
+    them before the real end of the sentence. Treating the first one as a
+    boundary truncated the "sentence" right after the first figure, dropping
+    earlier words (the column name, "average", the subject) from every later
+    number's context — which is exactly what made three correctly-labelled
+    regional figures come back "misattributed" (measured: only the first of
+    four numbers in such a sentence survived).
+    """
+    return (
+        text[pos] == "."
+        and pos > 0 and pos + 1 < len(text)
+        and text[pos - 1].isdigit() and text[pos + 1].isdigit()
+    )
+
+
+def _rfind_sentence_boundary(text: str, end: int) -> int:
+    """Nearest '.', '!', '?' or newline before ``end``, skipping decimal points."""
+    pos = end
+    while pos > 0:
+        pos -= 1
+        if text[pos] in ".!?\n" and not _is_decimal_point(text, pos):
+            return pos
+    return -1
+
+
+def _find_sentence_boundary(text: str, start: int) -> int:
+    """Nearest '.', '!', '?' or newline at/after ``start``, skipping decimal points."""
+    pos = start
+    while pos < len(text):
+        if text[pos] in ".!?\n" and not _is_decimal_point(text, pos):
+            return pos
+        pos += 1
+    return len(text)
+
+
 def _sentence_around(text: str, start: int, end: int) -> str:
     """The sentence containing a match, used to look for the correct label.
 
@@ -349,16 +390,8 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     false "misattributed" on a correct answer costs more trust than a missed
     flag, because it teaches the reader to ignore the warning.
     """
-    left = max(
-        text.rfind(".", 0, start), text.rfind("!", 0, start),
-        text.rfind("?", 0, start), text.rfind("\n", 0, start),
-    )
-    right_candidates = [
-        i for i in (text.find(".", end), text.find("!", end),
-                    text.find("?", end), text.find("\n", end))
-        if i != -1
-    ]
-    right = min(right_candidates) if right_candidates else len(text)
+    left = _rfind_sentence_boundary(text, start)
+    right = _find_sentence_boundary(text, end)
     return text[left + 1:right]
 
 
