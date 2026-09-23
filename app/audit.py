@@ -76,6 +76,7 @@ DATA_CLEANED = "data.cleaned"
 DATA_EXPORTED = "data.exported"
 DATA_VERSION_SWITCHED = "data.version_switched"
 QUESTION_ANSWERED = "question.answered"
+INVESTIGATION_RUN = "investigation.run"
 SOURCE_TESTED = "source.tested"
 ACCESS_DENIED = "access.denied"
 AUTH_FAILED = "auth.failed"
@@ -90,8 +91,9 @@ PASSWORD_RESET_COMPLETED = "auth.password_reset_completed"
 
 ACTIONS = frozenset({
     DATA_LOADED, DATA_CLEANED, DATA_EXPORTED, DATA_VERSION_SWITCHED,
-    QUESTION_ANSWERED, SOURCE_TESTED, ACCESS_DENIED, AUTH_FAILED,
-    AUTH_SUCCEEDED, PASSWORD_RESET_REQUESTED, PASSWORD_RESET_COMPLETED,
+    QUESTION_ANSWERED, INVESTIGATION_RUN, SOURCE_TESTED, ACCESS_DENIED,
+    AUTH_FAILED, AUTH_SUCCEEDED, PASSWORD_RESET_REQUESTED,
+    PASSWORD_RESET_COMPLETED,
 })
 
 # Rotate at this size and keep this many old files. Bounded because an audit

@@ -43,6 +43,7 @@ from app.data.profile import dataset_quality
 from app.llm import get_provider
 from app.llm.context import build_context
 from app.llm.injection import scan_frame
+from app.llm.investigate import InvestigationFailed, investigate
 from app.llm.sql_answer import SqlPlanningFailed, answer_with_sql
 from app.llm.validation import capability_summary, validate_answer
 from app.resources import HOST, UPLOAD_PEAK_MULTIPLIER, can_admit
@@ -139,7 +140,7 @@ LLM_RATE_CAPACITY = float(config.limits.llm_rate_capacity)
 LLM_RATE_REFILL_PER_SECOND = config.limits.llm_rate_refill_per_second
 
 _RATE_EXEMPT_PATHS = {"/health", "/metrics"}
-_LLM_PATHS = ("/query", "/query/stream")
+_LLM_PATHS = ("/query", "/query/stream", "/investigate")
 
 # A forgot-password request costs an email send against a real inbox, so it
 # gets its own, far tighter bucket on top of the general one — see
@@ -1527,6 +1528,11 @@ class QueryReq(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
 
 
+class InvestigateReq(BaseModel):
+    session_id: str = Field(max_length=200)
+    target_column: str = Field(min_length=1, max_length=500)
+
+
 class CleanOperation(BaseModel):
     # Must match the operations implemented in app/data/cleaner.py — unknown
     # values are rejected with 422 instead of silently doing nothing.
@@ -1804,6 +1810,40 @@ def query_stream(req: QueryReq, request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/investigate")
+def investigate_route(req: InvestigateReq, request: Request):
+    """What explains this metric — hypotheses proposed by the model, decided by the engine.
+
+    Two LLM calls (propose candidate drivers, then narrate the corrected
+    results) bracket a purely deterministic middle: each candidate is tested
+    with a real statistical test against the actual rows, and the whole batch
+    is corrected for multiple comparisons before anything is called
+    'significant'. The model is never the thing that decides a hypothesis
+    holds up — see app/llm/investigate.py for why that split matters.
+    """
+    session = _get_session(req.session_id, request)
+    started = time.perf_counter()
+
+    with _llm_slot():
+        try:
+            provider = get_provider()
+            report = investigate(provider, session.active, req.target_column, session.profiles())
+        except InvestigationFailed as e:
+            raise HTTPException(400, str(e)) from e
+        except Exception as e:
+            obs.llm_requests.inc(path="investigate", outcome="error")
+            raise HTTPException(*_llm_error(e)) from e
+
+    obs.llm_requests.inc(path="investigate", outcome="ok")
+    obs.llm_latency.observe(time.perf_counter() - started, path="investigate")
+    _record_audit(
+        audit_mod.INVESTIGATION_RUN, session_id=req.session_id,
+        target_column=req.target_column[:200], hypotheses=len(report.hypotheses),
+        significant=report.significant_count,
+    )
+    return _jsonable(report.to_dict())
 
 
 @app.get("/audit")

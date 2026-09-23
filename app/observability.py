@@ -373,7 +373,7 @@ upload_rows = histogram(
 )
 
 llm_requests = counter(
-    "lana_llm_requests_total", "LLM calls by path (sql|ledger) and outcome."
+    "lana_llm_requests_total", "LLM calls by path (sql|ledger|investigate) and outcome."
 )
 llm_latency = histogram(
     "lana_llm_seconds", "LLM end-to-end answer latency by path."
