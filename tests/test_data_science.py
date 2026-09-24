@@ -723,6 +723,39 @@ def test_detect_issues_reports_quality_profiles_and_reasoning(sales_df):
     assert "rating" not in issues["outliers"]  # codes have no outliers
 
 
+def test_duplicate_sample_shows_matching_pairs_not_unrelated_rows():
+    """A sampled 'duplicate' row must have its exact twin next to it.
+
+    Regression test: the sample used to be `df[duplicated].head(6)` with no
+    ordering, so on a frame with several different duplicate groups the first
+    few rows could each come from a *different* group — four rows shown side
+    by side, none of them matching each other, which looks like a false
+    positive even though every one genuinely has a twin elsewhere in the
+    frame. Sorting the duplicated subset before sampling puts a row and its
+    twin next to each other, so the sample is self-evidently correct.
+    """
+    base = pd.DataFrame({
+        "id": ["a", "b", "c", "d"],
+        "region": ["north", "south", "east", "west"],
+        "value": [1.0, 2.0, 3.0, 4.0],
+    })
+    # Each of the four base rows gets exactly one duplicate elsewhere in the
+    # frame, and they are deliberately interleaved rather than adjacent.
+    df = pd.concat([base, base]).sample(frac=1.0, random_state=0).reset_index(drop=True)
+
+    issues = detect_issues(df)
+    sample = issues["duplicates"]["sample_rows"]
+    assert issues["duplicates"]["count"] == 4
+
+    # Every consecutive pair in the (sorted) sample must be identical to each
+    # other - that is what "these are duplicates" actually has to demonstrate.
+    for i in range(0, len(sample) - 1, 2):
+        assert sample[i] == sample[i + 1], (
+            f"rows {i} and {i + 1} in the duplicate sample don't match: "
+            f"{sample[i]} vs {sample[i + 1]}"
+        )
+
+
 def _pairwise_frame() -> pd.DataFrame:
     """Three numeric columns with deliberately different pairwise strengths.
 

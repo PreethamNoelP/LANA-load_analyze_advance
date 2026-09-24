@@ -73,8 +73,18 @@ def detect_issues(df: pd.DataFrame, profiles: dict | None = None) -> dict:
     # ── 1. Duplicates ────────────────────────────────────────────────────────
     dup_count = int(df.duplicated().sum())
     if dup_count > 0:
+        # Every row that is part of *some* duplicate group, in whatever order
+        # they happen to sit in the frame. Sorted by every column so that a
+        # row and its exact twin land next to each other in the sample — the
+        # unsorted version could show four rows from four different groups,
+        # none of which look alike side by side, which reads as a false
+        # positive even though each one genuinely has a match elsewhere.
+        dup_subset = df[df.duplicated(keep=False)]
+        dup_subset = dup_subset.sort_values(
+            by=list(dup_subset.columns), na_position="first", kind="stable"
+        )
         sample_rows = []
-        for rec in df[df.duplicated(keep=False)].head(6).to_dict(orient="records"):
+        for rec in dup_subset.head(6).to_dict(orient="records"):
             sample_rows.append({k: _safe(v) if isinstance(v, float) else v for k, v in rec.items()})
         issues["duplicates"] = {
             "count": dup_count,
